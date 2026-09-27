@@ -97,6 +97,58 @@ const DEFAULT_CLIENT_MODE = "backend";
 const DEFAULT_CLIENT_VERSION = "paperclip";
 const DEFAULT_ROLE = "operator";
 
+// Both bounds stay well inside the host's stop deadline, which rejects an
+// unacknowledged stop after 60s. A stop request must never outlive the wait it
+// is waiting for.
+const CANCEL_ABORT_RPC_TIMEOUT_MS = 5_000;
+const CANCEL_SETTLE_TIMEOUT_MS = 10_000;
+
+/**
+ * Resolves when Paperclip aborts the run signal, including when the signal was
+ * already aborted before arming. Removes its listener on disarm so a Stop that
+ * arrives after execution settles cannot reach a finished run.
+ */
+function armOperatorAbort(signal: AbortSignal | undefined): {
+  aborted: Promise<void>;
+  disarm: () => void;
+} {
+  if (!signal) {
+    return { aborted: new Promise<void>(() => {}), disarm: () => {} };
+  }
+  let settle!: () => void;
+  const aborted = new Promise<void>((resolve) => {
+    settle = resolve;
+  });
+  // A listener attached to an already-aborted signal never fires, so resolve
+  // the same way for a Stop that landed before the remote run existed.
+  if (signal.aborted) settle();
+  else signal.addEventListener("abort", settle, { once: true });
+  return { aborted, disarm: () => signal.removeEventListener("abort", settle) };
+}
+
+function createDeferredSignal(): {
+  promise: Promise<void>;
+  resolve: () => void;
+  readonly settled: boolean;
+} {
+  let resolve!: () => void;
+  const deferred = {
+    settled: false,
+    promise: new Promise<void>((r) => {
+      resolve = () => {
+        deferred.settled = true;
+        r();
+      };
+    }),
+    resolve: () => resolve(),
+  };
+  return deferred;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 const SENSITIVE_LOG_KEY_PATTERN =
   /(^|[_-])(auth|authorization|token|secret|password|api[_-]?key|private[_-]?key)([_-]|$)|^x-openclaw-(auth|token)$/i;
 
@@ -1186,6 +1238,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   let latestResultPayload: unknown = null;
   let retryCount = 0;
   let dispatchReported = false;
+  let cancellationRegistered = false;
   const MAX_RETRIES = 2;
 
   const reportDispatch = () => {
@@ -1199,6 +1252,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const assistantChunks: string[] = [];
     let lifecycleError: string | null = null;
     let deviceIdentity: GatewayDeviceIdentity | null = null;
+    // Proof that the gateway reported the run reaching a terminal state. Used
+    // to verify an operator stop instead of assuming the stop request landed.
+    const terminalObserved = createDeferredSignal();
+    // Hoisted so the loop's finally block can always remove the abort listener,
+    // and so the catch path can report the stop verdict.
+    let disarmOperatorAbort: (() => void) | null = null;
+    let operatorStopAccepted = false;
 
     const onEvent = async (frame: GatewayEventFrame) => {
       if (frame.event !== "agent") {
@@ -1237,6 +1297,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
       if (stream === "error") {
         lifecycleError = nonEmpty(data.error) ?? nonEmpty(data.message) ?? lifecycleError;
+        terminalObserved.resolve();
         return;
       }
 
@@ -1244,6 +1305,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         const phase = nonEmpty(data.phase)?.toLowerCase();
         if (phase === "error" || phase === "failed" || phase === "cancelled") {
           lifecycleError = nonEmpty(data.error) ?? nonEmpty(data.message) ?? lifecycleError;
+          terminalObserved.resolve();
         }
       }
     };
@@ -1321,6 +1383,34 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         `[openclaw-gateway] connected protocol=${asNumber(asRecord(hello)?.protocol, PROTOCOL_VERSION)}\n`,
       );
 
+      // There is no local child process to kill, so this adapter owns operator
+      // cancellation itself. Publish ownership before the dispatch boundary:
+      // once dispatch is reported the issue lock may release, and a Stop landing
+      // after that must still find a joinable owner instead of marking the run
+      // stopped while the remote run keeps executing.
+      if (!cancellationRegistered) {
+        cancellationRegistered = true;
+        await ctx.onCancellationReady?.();
+      }
+      if (ctx.signal?.aborted) {
+        // Stopped before any remote run exists, so there is nothing to stop and
+        // replaying from scratch cannot repeat an external action.
+        return {
+          exitCode: null,
+          signal: null,
+          timedOut: false,
+          errorCode: "cancelled",
+          errorMessage: "Stopped before the OpenClaw agent run was created.",
+          executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+          resultJson: {
+            executionCancellation: {
+              state: "acknowledged",
+              acknowledgedAt: new Date().toISOString(),
+            },
+          },
+        };
+      }
+
       // Keep any server-side continuation lock through retryable websocket
       // setup and backoff. The first agent request is the remote-work boundary:
       // once it is sent, retrying would be unsafe because the gateway may have
@@ -1341,10 +1431,96 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         `[openclaw-gateway] agent accepted runId=${acceptedRunId} status=${acceptedStatus || "unknown"}\n`,
       );
 
+      // Arm operator cancellation only now that a remote run id exists, so a
+      // stop request can never name a run the gateway has not accepted.
+      const operatorAbort = armOperatorAbort(ctx.signal);
+      disarmOperatorAbort = operatorAbort.disarm;
+      let stopSettled = false;
+      let stopPromise: Promise<void> | null = null;
+
+      // chat.abort is the supported external cancellation surface for runs
+      // started through the agent RPC. Issue it at most once per run.
+      const requestRemoteStop = async (): Promise<void> => {
+        if (!stopPromise) {
+          stopPromise = (async () => {
+            try {
+              const response = asRecord(
+                await client.request("chat.abort", { sessionKey, runId: acceptedRunId }, {
+                  timeoutMs: CANCEL_ABORT_RPC_TIMEOUT_MS,
+                }),
+              );
+              // Gateways that predate agent-run abort support answer
+              // aborted:false without touching the run. Treat that as no proof.
+              operatorStopAccepted = response?.aborted === true;
+              await ctx.onLog(
+                "stdout",
+                `[openclaw-gateway] chat.abort runId=${acceptedRunId} aborted=${operatorStopAccepted}\n`,
+              );
+            } catch (err) {
+              await ctx.onLog(
+                "stderr",
+                `[openclaw-gateway] chat.abort failed: ${err instanceof Error ? err.message : String(err)}\n`,
+              );
+            }
+          })();
+        }
+        await stopPromise;
+      };
+
+      const settleOperatorStop = async (): Promise<void> => {
+        if (stopSettled) return;
+        stopSettled = true;
+        await operatorAbort.aborted;
+        await requestRemoteStop();
+        // Bound the wait for remote termination well inside the host stop
+        // deadline. A terminal lifecycle event, or agent.wait returning, is
+        // proof the run ended; otherwise the stop stays unproven.
+        await Promise.race([
+          terminalObserved.promise,
+          delay(CANCEL_SETTLE_TIMEOUT_MS),
+        ]);
+      };
+
+      const applyCancellation = (
+        result: AdapterExecutionResult,
+        options: { terminalProven?: boolean } = {},
+      ): AdapterExecutionResult => {
+        if (!ctx.signal?.aborted) return result;
+        if (operatorStopAccepted && (options.terminalProven === true || terminalObserved.settled)) {
+          return {
+            ...result,
+            resultJson: {
+              ...result.resultJson,
+              executionCancellation: {
+                state: "acknowledged",
+                acknowledgedAt: new Date().toISOString(),
+                proof: "openclaw_gateway_terminal_aborted",
+              },
+            },
+          };
+        }
+        // Fail closed. Without proof the remote run may still be executing, so
+        // do not acknowledge and let the host surface the conflict.
+        return {
+          exitCode: 1,
+          signal: null,
+          timedOut: false,
+          errorCode: "openclaw_gateway_cancel_unverified",
+          errorMessage:
+            "Paperclip stop was requested but the OpenClaw gateway did not confirm the run terminated. The remote run may still be executing.",
+          provider: "openclaw",
+          resultJson: {
+            runId: acceptedRunId,
+            chatAbortAccepted: operatorStopAccepted,
+            lastResult: asRecord(result.resultJson),
+          },
+        };
+      };
+
       if (acceptedStatus === "error") {
         const errorMessage =
           nonEmpty(acceptedPayload?.summary) ?? lifecycleError ?? "OpenClaw gateway agent request failed";
-        return {
+        const agentError: AdapterExecutionResult = {
           exitCode: 1,
           signal: null,
           timedOut: false,
@@ -1352,16 +1528,63 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           errorCode: "openclaw_gateway_agent_error",
           resultJson: acceptedPayload,
         };
+        if (!ctx.signal?.aborted) return agentError;
+        await settleOperatorStop();
+        return applyCancellation(agentError);
       }
 
       if (acceptedStatus !== "ok") {
-        const waitPayload = await client.request<Record<string, unknown>>(
+        const waitPromise = client.request<Record<string, unknown>>(
           "agent.wait",
           { runId: acceptedRunId, timeoutMs: waitTimeoutMs },
           { timeoutMs: waitTimeoutMs + connectTimeoutMs },
         );
+        const stopSettledPromise = (async () => {
+          await settleOperatorStop();
+        })();
+        const waitPayload = ctx.signal?.aborted
+          // Stopped mid-wait: the run is already terminal, so agent.wait is
+          // proof on its own and there is nothing left to wait for.
+          ? await waitPromise
+          : await Promise.race([
+              waitPromise,
+              stopSettledPromise.then(() => null),
+            ]);
+        operatorAbort.disarm();
+        stopSettledPromise.catch(() => undefined);
+
+        if (waitPayload === null) {
+          // The operator stop settled first, so report the cancellation verdict
+          // rather than the pre-existing wait-status mapping.
+          if (ctx.signal?.aborted) return applyCancellation({ exitCode: null, signal: null, timedOut: false, resultJson: acceptedPayload });
+          return {
+            exitCode: 1,
+            signal: null,
+            timedOut: false,
+            errorCode: "openclaw_gateway_request_failed",
+            errorMessage: "OpenClaw gateway run did not report a result.",
+            resultJson: asRecord(latestResultPayload),
+          };
+        }
 
         latestResultPayload = waitPayload;
+        if (ctx.signal?.aborted) {
+          // agent.wait returned a terminal snapshot, which is terminal proof.
+          return applyCancellation(
+            {
+              exitCode: 1,
+              signal: null,
+              timedOut: false,
+              errorCode: "openclaw_gateway_wait_error",
+              errorMessage:
+                nonEmpty(waitPayload?.error) ??
+                lifecycleError ??
+                "OpenClaw gateway run was stopped by operator cancel.",
+              resultJson: waitPayload,
+            },
+            { terminalProven: true },
+          );
+        }
 
         const waitStatus = nonEmpty(waitPayload?.status)?.toLowerCase() ?? "";
         if (waitStatus === "timeout") {
@@ -1433,7 +1656,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         `[openclaw-gateway] run completed runId=${Array.from(trackedRunIds).join(",")} status=ok\n`,
       );
 
-      return {
+      const success: AdapterExecutionResult = {
         exitCode: 0,
         signal: null,
         timedOut: false,
@@ -1445,6 +1668,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         ...(runtimeServices.length > 0 ? { runtimeServices } : {}),
         ...(summary ? { summary } : {}),
       };
+      if (!ctx.signal?.aborted) return success;
+      // The gateway already returned the final result, so the remote run is
+      // terminal. Still stop it so nothing is left running, then acknowledge.
+      await settleOperatorStop();
+      return applyCancellation(success, { terminalProven: true });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const lower = message.toLowerCase();
@@ -1512,6 +1740,25 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
       await ctx.onLog("stderr", `[openclaw-gateway] request failed: ${detailedMessage}\n`);
 
+      if (ctx.signal?.aborted) {
+        // The transport failed while a stop was outstanding, so the remote run's
+        // fate is unknown. Fail closed rather than claim termination.
+        return {
+          exitCode: 1,
+          signal: null,
+          timedOut: false,
+          errorCode: "openclaw_gateway_cancel_unverified",
+          errorMessage:
+            "Paperclip stop was requested but the OpenClaw gateway connection failed before the run termination was confirmed. The remote run may still be executing.",
+          provider: "openclaw",
+          resultJson: {
+            chatAbortAccepted: operatorStopAccepted,
+            lastError: message,
+            lastResult: asRecord(latestResultPayload),
+          },
+        };
+      }
+
       return {
         exitCode: 1,
         signal: null,
@@ -1525,6 +1772,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         resultJson: asRecord(latestResultPayload),
       };
     } finally {
+      // Remove the abort listener even when the loop retries, so a Stop that
+      // arrives between attempts cannot reach a run this iteration abandoned.
+      disarmOperatorAbort?.();
       client.close();
     }
   }

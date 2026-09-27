@@ -142,7 +142,9 @@ runs with `/api/v1/runs` after mapping them to the API base.
 
 This mode does not start Hermes. It creates runs with `POST /v1/runs`, streams
 Hermes events with SSE, polls run status as a fallback, and stops timed-out runs
-with `POST /v1/runs/{run_id}/stop`.
+and operator-cancelled runs with `POST /v1/runs/{run_id}/stop`. A cancelled run
+is only acknowledged to Paperclip once Hermes reports a terminal
+cancelled/stopped status.
 
 ### Compatibility with the old gateway package
 

@@ -708,6 +708,32 @@ export function mapFinalResultForTest(input: {
   };
 }
 
+/**
+ * Arms an operator Stop for this run. Resolves as soon as Paperclip aborts the
+ * run signal, including when the signal was already aborted before arming, and
+ * removes its listener on disarm so a later Stop cannot reach a finished run.
+ */
+function armOperatorCancellation(signal: AbortSignal | undefined): {
+  cancelled: Promise<"cancelled">;
+  disarm: () => void;
+} {
+  if (!signal) {
+    return { cancelled: new Promise<"cancelled">(() => {}), disarm: () => {} };
+  }
+  let settle!: () => void;
+  const cancelled = new Promise<"cancelled">((resolve) => {
+    settle = () => resolve("cancelled");
+  });
+  // A listener attached to an already-aborted signal never fires, so resolve
+  // the same way for a Stop that landed before the remote run existed.
+  if (signal.aborted) settle();
+  else signal.addEventListener("abort", settle, { once: true });
+  return {
+    cancelled,
+    disarm: () => signal.removeEventListener("abort", settle),
+  };
+}
+
 async function stopRun(input: {
   ctx: AdapterExecutionContext;
   baseUrl: URL;
@@ -876,10 +902,36 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   let runId: string | null = null;
   try {
+    // There is no local child process to kill, so this adapter owns cancellation
+    // itself. Publish ownership before the dispatch boundary: once dispatch is
+    // reported the issue lock may release, and a Stop landing after that must
+    // still find a joinable owner instead of marking the run stopped while the
+    // remote run keeps executing.
+    await ctx.onCancellationReady?.();
+    if (ctx.signal?.aborted) {
+      // Stopped before any remote run exists, so there is nothing to stop and
+      // replaying from scratch cannot repeat an external action.
+      return {
+        exitCode: null,
+        signal: null,
+        timedOut: false,
+        errorCode: "cancelled",
+        errorMessage: "Stopped before the Hermes run was created.",
+        executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+        resultJson: {
+          executionCancellation: {
+            state: "acknowledged",
+            acknowledgedAt: new Date().toISOString(),
+          },
+        },
+      };
+    }
     // This adapter has no local child process, so crossing into the first
     // remote create request is its dispatch boundary. Report it before the
     // request can block so continuation gates may release their issue lock.
     ctx.onDispatch?.();
+    // Deliberately not signal-aware: aborting this request would discard the
+    // run_id and leave the remote run running with no way to stop it.
     const created = await fetchJson(createRunUrl, {
       method: "POST",
       headers: runHeaders,
@@ -929,8 +981,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     timeoutTimer = setTimeout(() => resolve("timeout"), timeoutMs);
   });
 
-  const outcome = await Promise.race([state.terminalPromise, timeoutPromise]);
+  // Arm after the run id is known so a Stop that arrived during create is
+  // handled as a cancellation rather than silently ignored.
+  const cancellation = armOperatorCancellation(ctx.signal);
+  const outcome = await Promise.race([
+    state.terminalPromise,
+    timeoutPromise,
+    cancellation.cancelled,
+  ]);
   if (timeoutTimer) clearTimeout(timeoutTimer);
+  cancellation.disarm();
   controller.abort();
 
   if (outcome === "timeout") {
@@ -957,11 +1017,84 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     };
   }
 
-  return mapFinalResultForTest({
+  const sessionParams = {
+    hermesRunId: runId,
+    strategy,
+  };
+  const sessionDisplayId = sessionKey ? redactText(sessionKey) : null;
+
+  if (outcome === "cancelled") {
+    // Stop the remote run, then prove it actually terminated. A run created
+    // before the Stop may already have done partial provider work, so this
+    // deliberately grants no executionRecovery: replaying could repeat it.
+    await stopRun({ ctx, baseUrl, headers: eventHeaders, runId, redactText });
+    const finalStatus = await fetchFinalStatus({ baseUrl, headers: eventHeaders, runId, deadlineMs: STOP_GRACE_MS });
+    const terminalStatus = extractStatus(finalStatus);
+    const finalStatusLog = redactForLog(finalStatus, [], 0, redactText);
+    if (!terminalStatus || !TERMINAL_STATUSES.has(terminalStatus)) {
+      // Fail closed. Without proof the remote run may still be consuming
+      // compute, so do not acknowledge and let the host surface the conflict.
+      return {
+        exitCode: 1,
+        signal: null,
+        timedOut: false,
+        errorCode: "hermes_gateway_cancel_unverified",
+        errorMessage:
+          "Paperclip stop was requested but Hermes did not reach a terminal state within the stop grace window. The remote run may still be executing.",
+        provider: "hermes_gateway",
+        resultJson: {
+          run_id: runId,
+          status: terminalStatus ?? "unknown",
+          last_event: state.lastEventName,
+          final_status: finalStatusLog,
+        },
+        sessionParams,
+        sessionDisplayId,
+      };
+    }
+    return {
+      exitCode: 1,
+      signal: "SIGTERM",
+      timedOut: false,
+      errorCode: "hermes_gateway_cancelled",
+      errorMessage: `Hermes gateway run was stopped by operator cancel (${terminalStatus}).`,
+      provider: "hermes_gateway",
+      resultJson: {
+        run_id: runId,
+        status: terminalStatus,
+        last_event: state.lastEventName,
+        final_status: finalStatusLog,
+        executionCancellation: {
+          state: "acknowledged",
+          acknowledgedAt: new Date().toISOString(),
+          proof: "hermes_gateway_terminal_cancelled",
+        },
+      },
+      sessionParams,
+      sessionDisplayId,
+    };
+  }
+
+  const result = mapFinalResultForTest({
     terminal: outcome,
     outputChunks: state.outputChunks,
     sessionKey,
     strategy,
     redactText,
   });
+  if (!ctx.signal?.aborted) return result;
+  // A terminal state that raced a Stop still proves the remote run is gone:
+  // Hermes reported a terminal status after our /stop, so acknowledge without
+  // issuing a second stop request.
+  return {
+    ...result,
+    resultJson: {
+      ...result.resultJson,
+      executionCancellation: {
+        state: "acknowledged",
+        acknowledgedAt: new Date().toISOString(),
+        proof: "hermes_gateway_terminal_cancelled",
+      },
+    },
+  };
 }

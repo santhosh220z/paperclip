@@ -14,6 +14,24 @@ This adapter always uses WebSocket gateway transport.
 4. wait for completion via `req agent.wait`
 5. stream `event agent` frames into Paperclip logs/transcript parsing
 
+## Operator cancellation
+
+An operator Stop is propagated to the gateway with `req chat.abort` carrying the
+resolved `sessionKey` and the gateway `runId`. The request is issued at most
+once per run.
+
+Paperclip acknowledges the Stop only when the gateway both reports
+`aborted: true` and then confirms the run reached a terminal state, through a
+terminal `event agent` lifecycle frame or the `agent.wait` snapshot. Without
+both, the adapter returns `openclaw_gateway_cancel_unverified` and
+acknowledges nothing, so the host surfaces the stop as unverified rather than
+reporting a stopped run that is still executing.
+
+Gateways that predate agent-run abort support answer `chat.abort` with
+`aborted: false` and leave the run running. That answer is treated as no proof,
+so those gateways produce the same unverified stop rather than a false
+acknowledgement.
+
 ## Auth Modes
 
 Gateway credentials can be provided in any of these ways:

@@ -48,7 +48,7 @@ Runtime mapping:
 - Creates runs with POST /v1/runs.
 - Sends Idempotency-Key equal to the Paperclip run id for correlation only; Hermes v0.16.0 did not dedupe duplicate creates.
 - Streams GET /v1/runs/{run_id}/events and polls GET /v1/runs/{run_id} as fallback.
-- Calls POST /v1/runs/{run_id}/stop on timeout.
+- Calls POST /v1/runs/{run_id}/stop on timeout and on operator cancel.
 
 Security guidance:
 - Prefer HTTPS or a private overlay network for non-loopback hosts.

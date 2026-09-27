@@ -46,6 +46,11 @@ Wake payload notes:
 - Paperclip wake context is embedded into the generated message text
 - No top-level paperclip field is sent; the gateway agent schema rejects unknown root params
 
+Operator cancellation:
+- Stopping a run sends chat.abort with the resolved sessionKey and gateway runId
+- Requires a gateway that can abort runs started through the agent RPC; older gateways answer aborted:false and the run keeps executing
+- A Stop is only acknowledged after the gateway confirms the run reached a terminal state; otherwise the run is reported as an unverified stop
+
 Standard result metadata supported:
 - meta.runtimeServices (array, optional): normalized adapter-managed runtime service reports
 - meta.previewUrl (string, optional): shorthand single preview URL

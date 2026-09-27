@@ -3,7 +3,10 @@ import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
 import { execute, mapFinalResultForTest, parseSseFramesForTest, resolveSessionKey } from "./execute.js";
 import { testEnvironment } from "./test.js";
 
-function makeCtx(config: Record<string, unknown>): AdapterExecutionContext {
+function makeCtx(
+  config: Record<string, unknown>,
+  overrides: Partial<AdapterExecutionContext> = {},
+): AdapterExecutionContext {
   return {
     runId: "pc-run-1",
     agent: {
@@ -29,6 +32,7 @@ function makeCtx(config: Record<string, unknown>): AdapterExecutionContext {
     },
     onLog: vi.fn(async () => undefined),
     onMeta: vi.fn(async () => undefined),
+    ...overrides,
   };
 }
 
@@ -578,6 +582,222 @@ describe("execute", () => {
     expect(result.timedOut).toBe(true);
     expect(result.errorCode).toBe("hermes_gateway_timeout");
     expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith("/stop"))).toBe(true);
+  });
+});
+
+describe("operator cancellation", () => {
+  const config = {
+    apiBaseUrl: "http://127.0.0.1:8642",
+    apiKey: "secret-key",
+    timeoutSec: 0,
+  };
+
+  function countCalls(mock: ReturnType<typeof vi.fn>, suffix: string): number {
+    return mock.mock.calls.filter(([input]) => String(input).endsWith(suffix)).length;
+  }
+
+  it("registers cancellation ownership before reporting dispatch", async () => {
+    const order: string[] = [];
+    const controller = new AbortController();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/v1/runs")) {
+        return new Response(JSON.stringify({ run_id: "run-order", status: "started" }), { status: 200 });
+      }
+      if (url.endsWith("/events")) {
+        return new Response(
+          sseStream(["event: run.completed", "data: {\"status\":\"completed\",\"output\":\"done\"}", ""].join("\n")),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        );
+      }
+      return new Response(JSON.stringify({ status: "completed" }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await execute(
+      makeCtx(config, {
+        signal: controller.signal,
+        onCancellationReady: async () => {
+          order.push("cancellation-ready");
+        },
+        onDispatch: () => {
+          order.push("dispatch");
+        },
+      }),
+    );
+
+    expect(order).toEqual(["cancellation-ready", "dispatch"]);
+  });
+
+  it("stops the remote run and acknowledges a verified operator cancel", async () => {
+    const controller = new AbortController();
+    let stopped = false;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/v1/runs")) {
+        // A Stop that lands while the run is being created must still be
+        // honoured once the run id becomes available.
+        queueMicrotask(() => controller.abort());
+        return new Response(JSON.stringify({ run_id: "run-cancel", status: "started" }), { status: 200 });
+      }
+      if (url.endsWith("/events")) {
+        return new Promise<Response>(() => {});
+      }
+      if (url.endsWith("/stop")) {
+        stopped = true;
+        return new Response(JSON.stringify({ status: "stopping" }), { status: 200 });
+      }
+      if (init?.method === "GET") {
+        return new Response(
+          JSON.stringify(stopped ? { status: "cancelled" } : { status: "running" }),
+          { status: 200 },
+        );
+      }
+      return new Response(JSON.stringify({ status: "running" }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await execute(makeCtx(config, { signal: controller.signal }));
+
+    expect(countCalls(fetchMock, "/stop")).toBe(1);
+    expect(result.errorCode).toBe("hermes_gateway_cancelled");
+    expect(result.resultJson?.executionCancellation).toMatchObject({
+      state: "acknowledged",
+      proof: "hermes_gateway_terminal_cancelled",
+    });
+  });
+
+  it("does not acknowledge when Hermes never reaches a terminal state", async () => {
+    const controller = new AbortController();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/v1/runs")) {
+        queueMicrotask(() => controller.abort());
+        return new Response(JSON.stringify({ run_id: "run-unverified", status: "started" }), { status: 200 });
+      }
+      if (url.endsWith("/events")) {
+        return new Promise<Response>(() => {});
+      }
+      if (url.endsWith("/stop")) {
+        return new Response(JSON.stringify({ status: "stopping" }), { status: 200 });
+      }
+      // The gateway accepts the stop but can never confirm the run ended, so
+      // the status read fails instead of reporting a terminal state.
+      if (init?.method === "GET") {
+        return new Response(JSON.stringify({ error: "unavailable" }), { status: 500 });
+      }
+      return new Response(JSON.stringify({ status: "running" }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await execute(makeCtx(config, { signal: controller.signal }));
+
+    expect(countCalls(fetchMock, "/stop")).toBe(1);
+    expect(result.errorCode).toBe("hermes_gateway_cancel_unverified");
+    expect(result.resultJson?.executionCancellation).toBeUndefined();
+  });
+
+  it("never creates a remote run when the stop already arrived", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const onDispatch = vi.fn();
+
+    const result = await execute(
+      makeCtx(config, { signal: controller.signal, onDispatch }),
+    );
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(onDispatch).not.toHaveBeenCalled();
+    expect(result.errorCode).toBe("cancelled");
+    expect(result.executionRecovery).toEqual({ kind: "bootstrap", providerWorkStarted: false });
+    expect(result.resultJson?.executionCancellation).toMatchObject({ state: "acknowledged" });
+  });
+
+  it("issues at most one stop when a terminal state races the stop", async () => {
+    const controller = new AbortController();
+    let stopped = false;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/v1/runs")) {
+        return new Response(JSON.stringify({ run_id: "run-race", status: "started" }), { status: 200 });
+      }
+      if (url.endsWith("/events")) {
+        // Hermes independently reports the stop, so the terminal state and the
+        // operator cancel settle at nearly the same moment.
+        queueMicrotask(() => controller.abort());
+        return new Response(
+          sseStream(["event: run.cancelled", "data: {\"status\":\"cancelled\"}", ""].join("\n")),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        );
+      }
+      if (url.endsWith("/stop")) {
+        stopped = true;
+        return new Response(JSON.stringify({ status: "stopping" }), { status: 200 });
+      }
+      if (init?.method === "GET") {
+        return new Response(
+          JSON.stringify(stopped ? { status: "cancelled" } : { status: "running" }),
+          { status: 200 },
+        );
+      }
+      return new Response(JSON.stringify({ status: "running" }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await execute(makeCtx(config, { signal: controller.signal }));
+
+    expect(countCalls(fetchMock, "/stop")).toBeLessThanOrEqual(1);
+    expect(result.resultJson?.executionCancellation).toMatchObject({ state: "acknowledged" });
+  });
+
+  it("does not stop the remote run when cancelled after the run finished", async () => {
+    const controller = new AbortController();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/v1/runs")) {
+        return new Response(JSON.stringify({ run_id: "run-done", status: "started" }), { status: 200 });
+      }
+      if (url.endsWith("/events")) {
+        return new Response(
+          sseStream(["event: run.completed", "data: {\"status\":\"completed\",\"output\":\"done\"}", ""].join("\n")),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        );
+      }
+      return new Response(JSON.stringify({ status: "completed" }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await execute(makeCtx(config, { signal: controller.signal }));
+    // The listener is removed once execution settles, so a later stop is inert.
+    controller.abort();
+
+    expect(result.exitCode).toBe(0);
+    expect(result.resultJson?.executionCancellation).toBeUndefined();
+    expect(countCalls(fetchMock, "/stop")).toBe(0);
+  });
+
+  it("leaves a normally completed run unacknowledged", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/v1/runs")) {
+        return new Response(JSON.stringify({ run_id: "run-plain", status: "started" }), { status: 200 });
+      }
+      if (url.endsWith("/events")) {
+        return new Response(
+          sseStream(["event: run.completed", "data: {\"status\":\"completed\",\"output\":\"done\"}", ""].join("\n")),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        );
+      }
+      return new Response(JSON.stringify({ status: "completed" }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await execute(makeCtx(config));
+
+    expect(result.exitCode).toBe(0);
+    expect(result.resultJson?.executionCancellation).toBeUndefined();
   });
 });
 
