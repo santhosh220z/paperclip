@@ -764,4 +764,78 @@ describe("mapFinalResultForTest", () => {
     expect(result.errorCode).toBe("hermes_gateway_run_failed");
     expect(result.errorMessage).toBe("boom");
   });
+
+  it("extracts model from runtime.model when top-level and usage.model are absent", () => {
+    const result = mapFinalResultForTest({
+      terminal: {
+        runId: "run-1",
+        status: "completed",
+        payload: {
+          status: "completed",
+          output: "done",
+          runtime: { provider: "openai", model: "gpt-4o", route_source: "api_server" },
+        },
+      },
+      outputChunks: [],
+      sessionKey: "session-key",
+      strategy: "issue",
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.model).toBe("gpt-4o");
+  });
+
+  it("prefers top-level model over runtime.model", () => {
+    const result = mapFinalResultForTest({
+      terminal: {
+        runId: "run-1",
+        status: "completed",
+        payload: {
+          status: "completed",
+          output: "done",
+          model: "preferred-model",
+          runtime: { model: "runtime-model" },
+        },
+      },
+      outputChunks: [],
+      sessionKey: "session-key",
+      strategy: "issue",
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.model).toBe("preferred-model");
+  });
+
+  it("prefers usage.model over runtime.model", () => {
+    const result = mapFinalResultForTest({
+      terminal: {
+        runId: "run-1",
+        status: "completed",
+        payload: {
+          status: "completed",
+          output: "done",
+          usage: { model: "usage-model" },
+          runtime: { model: "runtime-model" },
+        },
+      },
+      outputChunks: [],
+      sessionKey: "session-key",
+      strategy: "issue",
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.model).toBe("usage-model");
+  });
+
+  it("returns null model when no model field is present", () => {
+    const result = mapFinalResultForTest({
+      terminal: {
+        runId: "run-1",
+        status: "completed",
+        payload: { status: "completed", output: "done" },
+      },
+      outputChunks: [],
+      sessionKey: "session-key",
+      strategy: "issue",
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.model).toBeNull();
+  });
 });
