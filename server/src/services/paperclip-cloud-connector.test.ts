@@ -262,6 +262,27 @@ describe("Paperclip Cloud connector", () => {
     });
   });
 
+  it.each([
+    ["https://app.asana.com/-/oauth_authorize", true],
+    ["https://mcp.asana.com/authorize", false],
+    ["https://app.asana.com/other", false],
+  ])("validates Asana's exact v2 authorization endpoint %s", async (authorizationUrl, accepted) => {
+    const keys = config();
+    const connector = createPaperclipCloudConnector({ config: keys.config,
+      request: vi.fn(async (_url, init) => {
+        const body = JSON.parse(String(init?.body));
+        const claims = JSON.parse(Buffer.from(body.request.split(".")[1], "base64url").toString("utf8"));
+        expect(claims).toMatchObject({ prv: "asana", prf: "asana.mcp", scp: ["default"] });
+        return Response.json({ confirmationUrl: "https://my.example.test/connections/confirm?session=test",
+          authorizationUrl, expiresAt: "2099-01-01T00:00:00Z" });
+      }) as typeof fetch,
+    });
+    const result = connector.startAuthorization({ subject, companyId, profile: "asana.mcp",
+      returnUri: "https://paperclip.example.test/api/tools/oauth/cloud-connector/callback", returnState: "state" });
+    if (accepted) await expect(result).resolves.toMatchObject({ authorizationUrl });
+    else await expect(result).rejects.toMatchObject({ code: "CONNECTOR_BAD_RESPONSE" });
+  });
+
   it("accepts the fixed Google authorization endpoint for Google profiles", async () => {
     const keys = config();
     const connector = createPaperclipCloudConnector({
@@ -589,10 +610,12 @@ describe("Paperclip Cloud connector", () => {
 function seal(
   payload: unknown,
   recipientPublicKey: KeyObject,
-  purpose: "initial" | "access",
+  purpose: "initial" | "access" | "events",
   configValue: PaperclipCloudConnectorConfig,
-  profile: keyof typeof GOOGLE_WORKSPACE_CONNECTOR_PROFILES,
+  profile: keyof typeof GOOGLE_WORKSPACE_CONNECTOR_PROFILES | "github.bot" | "github.code",
 ) {
+  const provider = profile.startsWith("github.") ? "github" : "google";
+  const scopes = provider === "github" ? [] : GOOGLE_WORKSPACE_CONNECTOR_PROFILES[profile as keyof typeof GOOGLE_WORKSPACE_CONNECTOR_PROFILES].scopes;
   const ephemeral = generateKeyPairSync("x25519");
   const ephemeralJwk = ephemeral.publicKey.export({ format: "jwk" }) as { x: string };
   const recipientJwk = recipientPublicKey.export({ format: "jwk" }) as { x: string };
@@ -604,9 +627,9 @@ function seal(
     purpose,
     configValue.instanceId,
     configValue.environment,
-    "google",
+    provider,
     profile,
-    [...GOOGLE_WORKSPACE_CONNECTOR_PROFILES[profile].scopes].sort().join(" "),
+    [...scopes].sort().join(" "),
   ].join("\n"));
   const key = Buffer.from(hkdfSync(
     "sha256",
@@ -623,10 +646,34 @@ function seal(
     v: 1,
     alg: "X25519-HKDF-SHA256-A256GCM",
     purpose,
-    provider: "google",
+    provider,
     profile,
     epk: ephemeralJwk.x,
     iv: iv.toString("base64url"),
     ct: ciphertext.toString("base64url"),
   };
 }
+
+describe("dedicated App gateway delivery", () => {
+  it.each([1, 2])("requires the stack-owned setup protocol version (%s)", async version => {
+    const connector = createPaperclipCloudConnector({ config: config().config, request: vi.fn(async () => Response.json({active:true,githubApps:{version}})) as typeof fetch });
+    expect(await connector.githubAppsAvailable()).toBe(version === 2);
+  });
+  it("decrypts opaque webhook bytes sealed before Cloud storage", async () => {
+    const keys = config();
+    const rawBody = Buffer.from('{ "comment": { "body": "private comment" } }').toString("base64");
+    const packet = { v:1,instanceId,environment:"staging",registrationId:"route-a",rawBody,headers:{"x-github-event":"issue_comment","x-github-delivery":"delivery-a","x-hub-signature-256":"signature"} };
+    const inner = seal(packet,keys.sealPublicKey,"events",keys.config,"github.bot");
+    const outer = seal({v:1,instanceId,environment:"staging",leaseId:"lease-a",events:[{id:"transport-a",provider:"github",event:"gateway_delivery",payload:{githubApp:{registrationId:"route-a",sealed:inner}},bindingIds:["github-app:route-a"]}]},keys.sealPublicKey,"events",keys.config,"github.code");
+    const connector = createPaperclipCloudConnector({config:keys.config,request:vi.fn(async()=>Response.json({leaseId:"lease-a",sealed:outer})) as typeof fetch});
+    expect((await connector.leaseEvents({subject,companyId}))?.events[0].payload.githubApp).toEqual(packet);
+    expect(JSON.stringify(inner)).not.toContain("private comment");
+  });
+  it("rejects an inner envelope swapped from another opaque route", async () => {
+    const keys = config();
+    const inner = seal({v:1,instanceId,environment:"staging",registrationId:"route-b"},keys.sealPublicKey,"events",keys.config,"github.bot");
+    const outer = seal({v:1,instanceId,environment:"staging",leaseId:"lease-a",events:[{id:"transport-a",provider:"github",event:"gateway_delivery",payload:{githubApp:{registrationId:"route-a",sealed:inner}},bindingIds:["github-app:route-a"]}]},keys.sealPublicKey,"events",keys.config,"github.code");
+    const connector=createPaperclipCloudConnector({config:keys.config,request:vi.fn(async()=>Response.json({leaseId:"lease-a",sealed:outer})) as typeof fetch});
+    await expect(connector.leaseEvents({subject,companyId})).rejects.toBeInstanceOf(PaperclipCloudConnectorError);
+  });
+});

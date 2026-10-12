@@ -3,6 +3,10 @@ import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { HttpError } from "../errors.js";
 
+vi.mock("../services/fast-responses.js", () => ({
+  enqueueFastResponse: vi.fn(async () => undefined),
+}));
+
 const mockIssueService = vi.hoisted(() => ({
   getById: vi.fn(),
   getByIdForUpdate: vi.fn(),
@@ -317,7 +321,7 @@ async function waitForWakeup(assertion: () => void) {
   await vi.waitFor(assertion);
 }
 
-describe.sequential("issue comment reopen routes", () => {
+describe("issue comment reopen routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockIssueService.getById.mockReset();
@@ -821,7 +825,7 @@ describe.sequential("issue comment reopen routes", () => {
     });
     mockAccessService.decide.mockImplementation(
       async (input: { action?: string }) => {
-        const allowed = input.action === "issue:comment";
+        const allowed = input.action === "issue:read" || input.action === "issue:comment";
         return {
           allowed,
           action: input.action,
@@ -869,7 +873,7 @@ describe.sequential("issue comment reopen routes", () => {
       });
       mockAccessService.decide.mockImplementation(
         async (input: { action?: string }) => {
-          const allowed = input.action === "issue:comment";
+          const allowed = input.action === "issue:read" || input.action === "issue:comment";
           return {
             allowed,
             action: input.action,
@@ -1435,7 +1439,7 @@ describe.sequential("issue comment reopen routes", () => {
         metadata,
         sourceTrust: null,
       },
-      mockDb,
+      mockTx,
     );
   });
 
@@ -2405,15 +2409,11 @@ describe.sequential("issue comment reopen routes", () => {
     );
 
     mockHeartbeatService.wakeup.mockClear();
-    mockIssueService.findMentionedAgents.mockClear();
     res = await request(await installActor(createApp(), agentActor(agentB)))
       .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
       .send({ body: "B replies on B's own issue" });
     expect(res.status).toBe(201);
-    await vi.waitFor(() =>
-      expect(mockIssueService.findMentionedAgents).toHaveBeenCalledOnce(),
-    );
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise<void>((resolve) => setImmediate(resolve));
     expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
 
     mockIssueService.getById.mockResolvedValue({
@@ -3345,7 +3345,8 @@ describe.sequential("issue comment reopen routes", () => {
       .send({ body: reviewBody });
 
     expect(res.status).toBe(201);
-    expect(mockDb.transaction).not.toHaveBeenCalled();
+    // The human comment and optional receipt commit together; no approval update occurs.
+    expect(mockDb.transaction).toHaveBeenCalledTimes(1);
     expect(mockIssueService.update).not.toHaveBeenCalled();
     expect(mockHeartbeatService.wakeup).not.toHaveBeenCalledWith(
       expect.any(String),

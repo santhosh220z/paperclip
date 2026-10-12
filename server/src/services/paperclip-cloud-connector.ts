@@ -1,3 +1,4 @@
+import { ASANA_CONNECTOR_SCOPES, isAsanaConnectorProfileId, type AsanaConnectorProfileId } from "@paperclipai/shared";
 import {
   createDecipheriv,
   createHash,
@@ -32,9 +33,9 @@ export const GMAIL_CONNECTOR_SCOPES = [
 export { GOOGLE_WORKSPACE_CONNECTOR_PROFILES };
 
 export type PaperclipCloudConnectorEnvironment = "development" | "staging" | "production";
-export type PaperclipCloudConnectorOperation = "status" | "session" | "claim" | "refresh" | "revoke" | "webhook-bind" | "event-lease" | "event-ack";
-export type PaperclipCloudConnectorProfileId = GoogleWorkspaceConnectorProfileId | GitHubConnectorProfileId;
-export type PaperclipCloudConnectorProvider = "google" | "github";
+export type PaperclipCloudConnectorOperation = "status" | "session" | "claim" | "refresh" | "revoke" | "webhook-bind" | "event-lease" | "event-ack" | "github-app";
+export type PaperclipCloudConnectorProfileId = GoogleWorkspaceConnectorProfileId | GitHubConnectorProfileId | AsanaConnectorProfileId | "github.bot";
+export type PaperclipCloudConnectorProvider = "google" | "github" | "asana";
 
 export type PaperclipCloudConnectorConfig = {
   baseUrl: string;
@@ -109,9 +110,11 @@ type ConnectorResponse = {
   leaseId?: unknown;
   events?: unknown;
   acknowledged?: unknown;
+  githubApps?: { version: number };
 };
 
 const ENDPOINTS: Record<PaperclipCloudConnectorOperation, string> = {
+  "github-app": "/v1/connector/github-apps",
   status: "/v1/connector/instance-status",
   session: "/v1/connector/sessions",
   claim: "/v1/connector/claims",
@@ -363,6 +366,22 @@ export function createPaperclipCloudConnector(input: {
   }
 
   return {
+    async githubAppsAvailable() {
+      const response = await call("status", { subject: "instance-capabilities", companyId: "instance-capabilities" });
+      return response.active === true && response.githubApps?.version === 2;
+    },
+    async githubApp(values: { subject: string; companyId: string; binding: Record<string, unknown> }) {
+      return await call("github-app", values, { field: "binding", value: JSON.stringify(values.binding) }) as unknown as import("@paperclipai/shared").GitHubAppCloudState;
+    },
+    async claimGitHubApp(values: { subject: string; companyId: string; claimId: string; redemptionId: string }) {
+      const response = await call("claim", { ...values, profile: "github.bot" });
+      const envelope = parseEnvelope(response.sealed, "initial", "github", "github.bot");
+      const opened = decryptEnvelope(envelope, sealKey, config.instanceId, config.environment, "github", "github.bot", []) as Record<string, unknown>;
+      if (opened.v !== 1 || opened.instanceId !== config.instanceId || opened.environment !== config.environment
+        || opened.subject !== values.subject || opened.companyId !== values.companyId || opened.provider !== "github"
+        || opened.profile !== "github.bot" || !sameStringSet(opened.scopes, [])) throw badEnvelope();
+      return opened;
+    },
     async getInstanceStatus(): Promise<"active" | "suspended" | "removed"> {
       let response: ConnectorResponse;
       try {
@@ -496,6 +515,15 @@ export function createPaperclipCloudConnector(input: {
       const opened = unsealEvents(envelope, sealKey, config.instanceId, config.environment);
       if (opened.leaseId !== response.leaseId) {
         throw new PaperclipCloudConnectorError("Paperclip Cloud connector event lease did not match", "CONNECTOR_BINDING_MISMATCH");
+      }
+      for (const event of opened.events) {
+        const packet = event.payload.githubApp;
+        if (!isRecord(packet) || packet.sealed === undefined) continue;
+        const sealed = parseEnvelope(packet.sealed, "events", "github", "github.bot");
+        const delivery = decryptEnvelope(sealed, sealKey, config.instanceId, config.environment, "github", "github.bot", []) as Record<string, unknown>;
+        if (delivery.v !== 1 || delivery.instanceId !== config.instanceId || delivery.environment !== config.environment
+          || delivery.registrationId !== packet.registrationId) throw badEnvelope();
+        event.payload = { githubApp: delivery };
       }
       return { leaseId: opened.leaseId, events: opened.events };
     },
@@ -754,6 +782,10 @@ function connectorProfileDefinition(profile: PaperclipCloudConnectorProfileId): 
   provider: PaperclipCloudConnectorProvider;
   scopes: readonly string[];
 } {
+  if (profile === "github.bot") return { provider: "github", scopes: [] };
+  if (isAsanaConnectorProfileId(profile)) {
+    return { provider: "asana", scopes: ASANA_CONNECTOR_SCOPES };
+  }
   if (isGitHubConnectorProfileId(profile)) {
     return { provider: "github", scopes: GITHUB_CONNECTOR_PROFILES[profile].scopes };
   }
@@ -764,6 +796,9 @@ function isExpectedProviderAuthorizationUrl(
   profile: PaperclipCloudConnectorProfileId,
   url: URL,
 ): boolean {
+  if (isAsanaConnectorProfileId(profile)) {
+    return url.origin === "https://app.asana.com" && url.pathname === "/-/oauth_authorize";
+  }
   if (isGitHubConnectorProfileId(profile)) {
     return url.origin === "https://github.com" && url.pathname === "/login/oauth/authorize";
   }
@@ -771,7 +806,7 @@ function isExpectedProviderAuthorizationUrl(
 }
 
 function isPaperclipCloudConnectorProfileId(value: string): value is PaperclipCloudConnectorProfileId {
-  return isGoogleWorkspaceConnectorProfileId(value) || isGitHubConnectorProfileId(value);
+  return isGoogleWorkspaceConnectorProfileId(value) || isGitHubConnectorProfileId(value) || isAsanaConnectorProfileId(value);
 }
 
 async function sha256Base64Url(value: string): Promise<string> {

@@ -85,7 +85,6 @@ import {
 import { buildIssueTree, countDescendants } from "../lib/issue-tree";
 import { getInboxKeyboardSelectionIndex } from "../lib/inbox";
 import { hasBlockingShortcutDialog, isKeyboardShortcutTextInputTarget } from "../lib/keyboardShortcuts";
-import { useGeneralSettings } from "../context/GeneralSettingsContext";
 import { buildSubIssueDefaultsForViewer } from "../lib/subIssueDefaults";
 import { statusBadge } from "../lib/status-colors";
 import { workflowSort } from "../lib/workflow-sort";
@@ -208,6 +207,9 @@ function normalizeIssueViewState(value: unknown): IssueViewState {
     ...defaultViewState,
     ...parsed,
     ...normalizeIssueFilterState(parsed),
+    // A saved workspace selection has no filter control. Drop it on load.
+    // `initialWorkspaces` from the page address is applied after this.
+    workspaces: [],
     sortField: ["status", "priority", "title", "created", "updated", "workflow"].includes(parsed.sortField ?? "")
       ? parsed.sortField as IssueSortField
       : defaultViewState.sortField,
@@ -251,14 +253,16 @@ function getInitialWorkspaceViewState(
   initialAssignees?: string[],
   initialWorkspaces?: string[],
   defaultSortField?: IssueSortField,
+  initialStatuses?: string[],
 ): IssueViewState {
   const initial = getInitialViewState(stored, initialAssignees, defaultSortField);
-  if (!initialWorkspaces) return initial;
-  return {
-    ...initial,
-    workspaces: initialWorkspaces,
-    statuses: [],
-  };
+  const scoped = initialWorkspaces
+    ? { ...initial, workspaces: initialWorkspaces, statuses: [] }
+    : initial;
+  // A status preset (Active / Backlog / Done, and All as the empty set) is the
+  // view's definition, so it wins over whatever the last session persisted.
+  // `undefined` means "no preset" and leaves the stored statuses alone.
+  return initialStatuses ? { ...scoped, statuses: initialStatuses } : scoped;
 }
 
 function getIssueColumnsStorageKey(key: string): string {
@@ -472,6 +476,12 @@ interface IssuesListProps {
   issueLinkState?: unknown;
   initialAssignees?: string[];
   initialWorkspaces?: string[];
+  /**
+   * Status preset applied on entry and whenever it changes, overriding the
+   * persisted status filter. `[]` clears it; `undefined` leaves it alone.
+   * Used by the Tasks view presets (PAP-670).
+   */
+  initialStatuses?: string[];
   initialSearch?: string;
   searchFilters?: Omit<IssueListRequestFilters, "q" | "projectId" | "limit" | "includeRoutineExecutions">;
   searchWithinLoadedIssues?: boolean;
@@ -496,6 +506,11 @@ interface IssuesListProps {
   rowPresentation?: IssueRowPresentation;
   /** Opt in per surface while the shared collection toolbar rolls out. */
   toolbarPresentation?: "legacy" | "collection";
+  /**
+   * Rendered before the create button in the toolbar's context slot — the hook
+   * the merged Tasks surface uses to put its Views control there (PAP-670).
+   */
+  toolbarContext?: ReactNode;
   onUpdateIssue: (id: string, data: Record<string, unknown>) => void;
 }
 
@@ -711,6 +726,7 @@ function StreamlinedIssuesList({
   issueLinkState,
   initialAssignees,
   initialWorkspaces,
+  initialStatuses,
   initialSearch,
   searchFilters,
   searchWithinLoadedIssues = false,
@@ -727,13 +743,13 @@ function StreamlinedIssuesList({
   onLoadMoreIssues,
   onSearchChange,
   rowPresentation = "legacy",
+  toolbarContext,
   toolbarPresentation = "legacy",
   onUpdateIssue,
 }: IssuesListProps) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { keyboardShortcutsEnabled } = useGeneralSettings();
   // Keyboard selection for the list view (mirrors the inbox). Hover moves the
   // selection only after real pointer movement, so keyboard-driven scrolling
   // doesn't hand the selection to whatever row lands under the cursor.
@@ -790,6 +806,7 @@ function StreamlinedIssuesList({
   };
   const initialAssigneesKey = initialAssignees?.join("|") ?? "";
   const initialWorkspacesKey = initialWorkspaces?.join("|") ?? "";
+  const initialStatusesKey = initialStatuses ? `set:${initialStatuses.join("|")}` : "";
   const initialPreferencesRef = useRef<ReturnType<typeof loadIssueCollectionPreferences> | null>(null);
   if (initialPreferencesRef.current === null) {
     initialPreferencesRef.current = loadIssueCollectionPreferences(preferenceLocation);
@@ -797,7 +814,13 @@ function StreamlinedIssuesList({
   const initialPreferences = initialPreferencesRef.current;
 
   const [viewState, setViewState] = useState<IssueViewState>(() =>
-    getInitialWorkspaceViewState(initialPreferences, initialAssignees, initialWorkspaces, defaultSortField),
+    getInitialWorkspaceViewState(
+      initialPreferences,
+      initialAssignees,
+      initialWorkspaces,
+      defaultSortField,
+      initialStatuses,
+    ),
   );
   const [assigneePickerIssueId, setAssigneePickerIssueId] = useState<string | null>(null);
   const [assigneeSearch, setAssigneeSearch] = useState("");
@@ -814,13 +837,21 @@ function StreamlinedIssuesList({
   }, [initialSearch]);
 
   // Reload view state whenever the persisted context changes.
-  const prevViewStateContextKey = useRef(`${scopedKey}::${initialAssigneesKey}::${initialWorkspacesKey}`);
+  const prevViewStateContextKey = useRef(
+    `${scopedKey}::${initialAssigneesKey}::${initialWorkspacesKey}::${initialStatusesKey}`,
+  );
   useEffect(() => {
-    const nextContextKey = `${scopedKey}::${initialAssigneesKey}::${initialWorkspacesKey}`;
+    const nextContextKey = `${scopedKey}::${initialAssigneesKey}::${initialWorkspacesKey}::${initialStatusesKey}`;
     if (prevViewStateContextKey.current !== nextContextKey) {
       prevViewStateContextKey.current = nextContextKey;
       const preferences = loadIssueCollectionPreferences(preferenceLocation);
-      setViewState(getInitialWorkspaceViewState(preferences, initialAssignees, initialWorkspaces, defaultSortField));
+      setViewState(getInitialWorkspaceViewState(
+        preferences,
+        initialAssignees,
+        initialWorkspaces,
+        defaultSortField,
+        initialStatuses,
+      ));
       setVisibleIssueColumns(preferences.columns);
     }
   }, [
@@ -829,6 +860,8 @@ function StreamlinedIssuesList({
     initialAssigneesKey,
     initialWorkspaces,
     initialWorkspacesKey,
+    initialStatuses,
+    initialStatusesKey,
     defaultSortField,
     preferenceLocation.companyId,
     preferenceLocation.collectionKey,
@@ -1012,16 +1045,6 @@ function StreamlinedIssuesList({
     }
     return map;
   }, [defaultProjectWorkspaceIds, executionWorkspaceById, projectWorkspaceById]);
-
-  const workspaceOptions = useMemo(() => {
-    const options = new Map<string, string>();
-    for (const [workspaceId, workspaceName] of workspaceNameMap) {
-      options.set(workspaceId, workspaceName);
-    }
-    return [...options.entries()]
-      .sort((a, b) => a[1].localeCompare(b[1]))
-      .map(([id, name]) => ({ id, name }));
-  }, [workspaceNameMap]);
 
   const creatorOptions = useMemo<CreatorOption[]>(() => {
     const options = new Map<string, CreatorOption>();
@@ -1432,7 +1455,6 @@ function StreamlinedIssuesList({
   }, []);
 
   useEffect(() => {
-    if (!keyboardShortcutsEnabled) return;
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.defaultPrevented) return;
       const target = e.target;
@@ -1530,7 +1552,7 @@ function StreamlinedIssuesList({
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [keyboardShortcutsEnabled, navigate, queryClient]);
+  }, [navigate, queryClient]);
 
   // Keep the keyboard selection visible while navigating. Depends on the
   // render budget too: a selection past the mounted batch scrolls once its
@@ -1729,7 +1751,15 @@ function StreamlinedIssuesList({
       <IssuesToolbar
         className="paperclip-task-list-toolbar"
         ariaLabel={toolbarPresentation === "collection" ? "Task controls" : undefined}
-        context={(
+        context={toolbarContext ? (
+          <div className="flex min-w-0 items-center gap-2">
+            {toolbarContext}
+            <Button size="sm" variant="outline" aria-label={createButtonLabel} onClick={() => openCreateIssueDialog()}>
+              <Plus className="h-4 w-4 sm:mr-1" />
+              <span className="hidden sm:inline">{createButtonLabel}</span>
+            </Button>
+          </div>
+        ) : (
           <Button size="sm" variant="outline" aria-label={createButtonLabel} onClick={() => openCreateIssueDialog()}>
             <Plus className="h-4 w-4 sm:mr-1" />
             <span className="hidden sm:inline">{createButtonLabel}</span>
@@ -1883,7 +1913,6 @@ function StreamlinedIssuesList({
             enableExternalObjectFilters={externalObjectsEnabled}
             enableRoutineVisibilityFilter={enableRoutineVisibilityFilter}
             iconOnly
-            workspaces={isolatedWorkspacesEnabled ? workspaceOptions : undefined}
             presentation={rowPresentation === "task" ? "streamlined" : "legacy"}
           />
 

@@ -64,7 +64,18 @@ export const companySkills = pgTable(
 
 export type CompanySkillVersionFileInventoryEntry = CompanySkillFileInventoryEntry & {
   content: string;
+  encoding?: "utf8" | "base64";
+  executable?: boolean;
 };
+
+/** Immutable repository bytes shared by all skill versions from the same package. */
+export const companySkillRepositorySnapshots = pgTable("company_skill_repository_snapshots", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+  contentHash: text("content_hash").notNull(),
+  fileInventory: jsonb("file_inventory").$type<CompanySkillVersionFileInventoryEntry[]>().notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, table => ({ content: uniqueIndex("company_skill_repository_snapshots_content_idx").on(table.companyId, table.contentHash) }));
 
 export const companySkillVersions = pgTable(
   "company_skill_versions",
@@ -72,6 +83,8 @@ export const companySkillVersions = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
     companySkillId: uuid("company_skill_id").notNull().references(() => companySkills.id, { onDelete: "cascade" }),
+    repositorySnapshotId: uuid("repository_snapshot_id").references(() => companySkillRepositorySnapshots.id, { onDelete: "restrict" }),
+    repositorySkillPath: text("repository_skill_path"),
     revisionNumber: integer("revision_number").notNull(),
     label: text("label"),
     releaseId: text("release_id"),

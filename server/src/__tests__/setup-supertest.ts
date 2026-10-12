@@ -5,6 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import { Server as TlsServer } from "node:tls";
 
+import { removeTestHome } from "./remove-test-home.js";
+
 type SupertestServer = NetServer & {
   address(): ReturnType<NetServer["address"]>;
   listen(port: number): NetServer;
@@ -20,6 +22,18 @@ type SupertestTestConstructor = {
     __paperclipLoopbackPatched?: boolean;
   };
 };
+
+// Keep the original home available only for read-only host port-lease checks.
+process.env.PAPERCLIP_TEST_HOST_HOME ??= process.env.PAPERCLIP_HOME?.trim() || path.join(os.homedir(), ".paperclip");
+
+// Receipt-spool recovery must never scan a developer's instance during tests.
+const paperclipTestHome = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-vitest-home-"));
+process.env.PAPERCLIP_HOME = paperclipTestHome;
+// Setup-file afterAll hooks run before suites drain asynchronous heartbeats.
+// Cleanup at worker exit, after all suite teardown, avoids deleting live state.
+// A run still finishing at exit can leave a read-only runtime-context bundle
+// under this home, which a plain recursive rm cannot remove.
+process.once("exit", () => removeTestHome(paperclipTestHome));
 
 const require = createRequire(import.meta.url);
 const SupertestTest = require("supertest/lib/test.js") as SupertestTestConstructor;

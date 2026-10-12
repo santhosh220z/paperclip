@@ -161,7 +161,10 @@ const mockIssueTreeControlService = vi.hoisted(() => ({ getActivePauseHoldGate: 
 const mockLogActivity = vi.hoisted(() => vi.fn(async () => undefined));
 const mockObserveCrossIssueInfluence = vi.hoisted(() => vi.fn(async () => null));
 
+const mockRetryWorkspaceExport = vi.hoisted(() => vi.fn());
+
 function registerRouteMocks() {
+  vi.doMock("../services/native-runtime/native-workspace-export-retry.js", () => ({ retryNativeWorkspaceExport: mockRetryWorkspaceExport }));
   vi.doMock("@paperclipai/shared/telemetry", () => ({
     trackAgentTaskCompleted: vi.fn(),
     trackErrorHandlerCrash: vi.fn(),
@@ -356,6 +359,9 @@ function createRunContextDb(
       orderBy: vi.fn(async () => []),
       limit: vi.fn(() => ({
         then: async (resolve: (limitedRows: unknown[]) => unknown) => resolve(await rowsForSelection(selection, chatBindingQuery, settledRecoveryQuery)),
+        for: vi.fn(() => ({
+          then: async (resolve: (lockedRows: unknown[]) => unknown) => resolve(await rowsForSelection(selection, chatBindingQuery, settledRecoveryQuery)),
+        })),
       })),
       for: vi.fn(() => ({
         then: async (resolve: (selectedRows: unknown[]) => unknown) => resolve(await rowsForSelection(selection, chatBindingQuery, settledRecoveryQuery)),
@@ -468,14 +474,16 @@ describe("agent issue mutation checkout ownership", () => {
         input.action === "issue:comment" ||
         input.action === "issue:read" ||
         input.action === "issue:mutate" ||
-        input.action === "company_scope:read",
+        input.action === "company_scope:read" ||
+        input.action === "project:read",
       action: input.action,
       reason:
         input.action === "tasks:assign" ||
           input.action === "issue:comment" ||
           input.action === "issue:read" ||
           input.action === "issue:mutate" ||
-          input.action === "company_scope:read"
+          input.action === "company_scope:read" ||
+          input.action === "project:read"
           ? "allow_explicit_grant"
           : "deny_missing_grant",
       explanation:
@@ -483,7 +491,8 @@ describe("agent issue mutation checkout ownership", () => {
           input.action === "issue:comment" ||
           input.action === "issue:read" ||
           input.action === "issue:mutate" ||
-          input.action === "company_scope:read"
+          input.action === "company_scope:read" ||
+          input.action === "project:read"
           ? "Allowed by test default."
           : "Missing permission.",
     }));
@@ -877,7 +886,7 @@ describe("agent issue mutation checkout ownership", () => {
 
   it("allows mentioned peer agents to post comments without ownership of an active checkout", async () => {
     mockAccessService.decide.mockImplementation(async (input: { action: string }) => ({
-      allowed: input.action === "issue:comment",
+      allowed: input.action === "issue:comment" || input.action === "issue:read",
       action: input.action,
       reason: input.action === "issue:comment" ? "allow_issue_mention_grant" : "deny_missing_grant",
       explanation:
@@ -960,8 +969,8 @@ describe("agent issue mutation checkout ownership", () => {
     const res = await request(await createApp(peerActor()))
       .get(`/api/issues/${issueId}/comments`);
 
-    expect(res.status, JSON.stringify(res.body)).toBe(403);
-    expect(res.body.error).toBe("Issue is outside this actor's authorization boundary");
+    expect(res.status, JSON.stringify(res.body)).toBe(404);
+    expect(res.body.error).toBe("Issue not found");
     expect(mockAccessService.decide).toHaveBeenCalledWith(expect.objectContaining({ action: "issue:read" }));
   });
 
@@ -976,8 +985,8 @@ describe("agent issue mutation checkout ownership", () => {
     const res = await request(await createApp(peerActor()))
       .get(`/api/issues/${issueId}/interactions`);
 
-    expect(res.status, JSON.stringify(res.body)).toBe(403);
-    expect(res.body.error).toBe("Issue is outside this actor's authorization boundary");
+    expect(res.status, JSON.stringify(res.body)).toBe(404);
+    expect(res.body.error).toBe("Issue not found");
     expect(mockAccessService.decide).toHaveBeenCalledWith(expect.objectContaining({ action: "issue:read" }));
     expect(mockIssueThreadInteractionService.listForIssue).not.toHaveBeenCalled();
   });
@@ -1022,8 +1031,8 @@ describe("agent issue mutation checkout ownership", () => {
     const res = await request(await createApp(peerActor()))
       .get(`/api/issues/${issueId}/comments/comment-1`);
 
-    expect(res.status, JSON.stringify(res.body)).toBe(403);
-    expect(res.body.error).toBe("Issue is outside this actor's authorization boundary");
+    expect(res.status, JSON.stringify(res.body)).toBe(404);
+    expect(res.body.error).toBe("Issue not found");
     expect(mockAccessService.decide).toHaveBeenCalledWith(expect.objectContaining({ action: "issue:read" }));
     expect(mockIssueService.getComment).not.toHaveBeenCalled();
   });
@@ -1031,7 +1040,7 @@ describe("agent issue mutation checkout ownership", () => {
   it("allows visible issue field updates for peer agents", async () => {
     mockIssueService.getById.mockResolvedValue(makeIssue({ status: "todo", assigneeAgentId: ownerAgentId }));
     mockAccessService.decide.mockImplementation(async (input: { action: string }) => ({
-      allowed: input.action === "issue:comment" || input.action === "issue:mutate",
+      allowed: input.action === "issue:comment" || input.action === "issue:mutate" || input.action === "issue:read",
       action: input.action,
       reason:
         input.action === "issue:comment"
@@ -1330,6 +1339,9 @@ describe("agent issue mutation checkout ownership", () => {
   });
 
   it("defaults agent-created root follow-up issues to inherit the current run workspace", async () => {
+    mockProjectService.getById.mockResolvedValue({
+      id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", companyId, visibility: "open",
+    } as never);
     const app = await createApp(
       ownerActor(),
       createRunContextDb({
@@ -1630,7 +1642,7 @@ describe("agent issue mutation checkout ownership", () => {
 
   it("allows agents with the active-checkout management grant to mutate active checkouts", async () => {
     mockAccessService.decide.mockImplementation(async (input: { action: string }) => ({
-      allowed: input.action === "issue:mutate" || input.action === "tasks:manage_active_checkouts",
+      allowed: input.action === "issue:mutate" || input.action === "tasks:manage_active_checkouts" || input.action === "issue:read",
       action: input.action,
       reason:
         input.action === "issue:mutate" || input.action === "tasks:manage_active_checkouts"
@@ -1991,6 +2003,45 @@ describe("agent issue mutation checkout ownership", () => {
         }),
       }),
     );
+  });
+
+  it("queues board export-only recovery without calling provider wake", async () => {
+    mockAccessService.decide.mockResolvedValue({ allowed: true });
+    mockRetryWorkspaceExport.mockResolvedValue({ runId: ownerRunId, status: "queued" });
+    const res = await request(await createApp(boardActor()))
+      .post(`/api/issues/${issueId}/recovery-actions/retry-workspace-export`)
+      .send({ actionId: recoveryActionId, runId: ownerRunId, repairNote: "Restored provider connectivity and preserved all saved files." });
+    expect(res.status).toBe(202);
+    expect(mockRetryWorkspaceExport).toHaveBeenCalledWith(expect.objectContaining({ companyId, issueId, runId: ownerRunId, actionId: recoveryActionId, actorId: "board-user" }));
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+  });
+
+  it.each(["agent", "viewer"])("rejects %s export-only retries before admission", async kind => {
+    mockAccessService.decide.mockImplementation(async (input: { action: string }) => ({
+      allowed: input.action === "issue:read", explanation: "The viewer can read but has no runtime access",
+    }));
+    const res = await request(await createApp(kind === "agent" ? ownerActor() : boardActor()))
+      .post(`/api/issues/${issueId}/recovery-actions/retry-workspace-export`)
+      .send({ actionId: recoveryActionId, runId: ownerRunId, repairNote: "Restored provider connectivity and preserved all saved files." });
+    expect(res.status).toBe(403); expect(mockRetryWorkspaceExport).not.toHaveBeenCalled();
+  });
+
+  it.each(["todo", "done", "in_review"].flatMap(sourceIssueStatus => ["native_workspace_sync_out_unsafe_archive", "native_workspace_sync_out_retry_exhausted"].map(cause => ({ sourceIssueStatus, cause }))))("does not resolve accepted export recovery through an ordinary $sourceIssueStatus transition: $cause", async ({ sourceIssueStatus, cause }) => {
+    const sourceIssue = makeIssue({ status: "blocked", assigneeAgentId: ownerAgentId });
+    mockIssueService.getById.mockResolvedValue(sourceIssue);
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({ ...sourceIssue, ...patch }));
+    mockIssueRecoveryActionService.getActiveForIssue.mockResolvedValue({
+      id: recoveryActionId, status: "active", kind: "active_run_watchdog", ownerType: "board",
+      ownerAgentId: null, returnOwnerAgentId: ownerAgentId,
+      cause, evidence: { runId: ownerRunId },
+    });
+    const res = await request(await createApp(boardActor()))
+      .post(`/api/issues/${issueId}/recovery-actions/resolve`)
+      .send({ actionId: recoveryActionId, outcome: "restored", sourceIssueStatus });
+    expect.soft(res.status).toBe(409);
+    expect.soft(res.body.details?.code).toBe(cause === "native_workspace_sync_out_unsafe_archive" ? "workspace_export_automatic_recovery" : "workspace_export_retry_required");
+    expect.soft(mockIssueService.update).not.toHaveBeenCalled();
+    expect.soft(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
   });
 
   it.each(["active", "waiting", "completed", "unavailable", "endpoint_removed"])(
@@ -2388,6 +2439,71 @@ describe("agent issue mutation checkout ownership", () => {
     );
   });
 
+  describe("repairing an unavailable starting branch", () => {
+    const repair = { actionId: recoveryActionId, outcome: "restored", sourceIssueStatus: "todo",
+      workspaceBaseRef: { requestedRef: "main", branch: "master" } };
+    function seedBranchRepair() {
+      mockAccessService.decide.mockResolvedValue({ allowed: true, reason: "allow_explicit_grant", explanation: "Allowed" });
+      const issue = makeIssue({ status: "blocked", assigneeAgentId: ownerAgentId,
+        executionWorkspaceSettings: { mode: "isolated_workspace", workspaceStrategy: { type: "git_worktree", baseRef: "main", branchTemplate: "task/{issueId}" } } });
+      mockIssueService.getById.mockResolvedValue(issue);
+      mockIssueService.update.mockImplementation(async (_id, patch) => ({ ...issue, ...patch }));
+      mockIssueRecoveryActionService.getActiveForIssue.mockResolvedValue({ id: recoveryActionId,
+        status: "active", cause: "configuration_incomplete", ownerType: "board", returnOwnerAgentId: ownerAgentId,
+        evidence: { latestRunId: ownerRunId } });
+      return createRunContextDb({}, [{ id: ownerRunId, companyId, agentId: ownerAgentId,
+        contextSnapshot: { issueId }, errorCode: "configuration_incomplete",
+        resultJson: { configurationIncomplete: { reason: "workspace_base_ref_unresolved", requestedRef: "main" } } }]);
+    }
+    it("saves the task-only branch in the recovery transaction and requests a retry", async () => {
+      const db = seedBranchRepair();
+      const res = await request(await createApp(boardActor(), db)).post(`/api/issues/${issueId}/recovery-actions/resolve`).send(repair);
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(mockIssueService.update).toHaveBeenCalledWith(issueId, expect.objectContaining({ status: "todo",
+        executionWorkspaceSettings: { mode: "isolated_workspace", workspaceStrategy: { type: "git_worktree", baseRef: "master", branchTemplate: "task/{issueId}" } },
+      }), expect.anything(), expect.anything());
+      expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(1);
+    });
+    it("creates a valid task override when the failing branch was inherited", async () => {
+      const db = seedBranchRepair();
+      mockIssueService.getById.mockResolvedValue(makeIssue({ status: "blocked", assigneeAgentId: ownerAgentId, executionWorkspaceSettings: null }));
+      const res = await request(await createApp(boardActor(), db)).post(`/api/issues/${issueId}/recovery-actions/resolve`).send(repair);
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(mockIssueService.update).toHaveBeenCalledWith(issueId, expect.objectContaining({
+        executionWorkspaceSettings: { workspaceStrategy: { type: "git_worktree", baseRef: "master" } },
+      }), expect.anything(), expect.anything());
+    });
+    it("preserves inherited agent setup when repairing only the base branch", async () => {
+      const db = seedBranchRepair();
+      mockIssueService.getById.mockResolvedValue(makeIssue({ status: "blocked", assigneeAgentId: ownerAgentId, executionWorkspaceSettings: null }));
+      const strategy = { type: "git_worktree", baseRef: "main", provisionCommand: "npm run setup", branchTemplate: "task/{{issue.identifier}}", worktreeParentDir: ".worktrees" };
+      mockAgentService.getById.mockResolvedValue({ ...makeAgent(ownerAgentId), adapterConfig: { workspaceStrategy: strategy } });
+      const res = await request(await createApp(boardActor(), db)).post(`/api/issues/${issueId}/recovery-actions/resolve`).send(repair);
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(mockIssueService.update).toHaveBeenCalledWith(issueId, expect.objectContaining({
+        executionWorkspaceSettings: { workspaceStrategy: { ...strategy, baseRef: "master" } },
+      }), expect.anything(), expect.anything());
+      expect(strategy.baseRef).toBe("main");
+    });
+    it.each(["stale", "project", "strategy", "agent", "permission", "paused", "run", "approval", "budget", "blocker"])("rejects %s repairs without saving or waking", async gate => {
+      const db = seedBranchRepair();
+      if (gate === "project") mockIssueService.getById.mockResolvedValue(makeIssue({ status: "blocked", assigneeAgentId: ownerAgentId, projectId: "new-project" }));
+      if (gate === "strategy") mockIssueService.getById.mockResolvedValue(makeIssue({ status: "blocked", assigneeAgentId: ownerAgentId, executionWorkspaceSettings: { workspaceStrategy: { type: "adapter_managed" } } }));
+      if (gate === "permission") mockAccessService.decide.mockImplementation(async ({ action }) => ({ allowed: action !== "runtime:manage", reason: "deny_missing_grant", explanation: "No runtime permission" }));
+      if (gate === "stale") mockIssueService.getById.mockResolvedValue(makeIssue({ status: "blocked", assigneeAgentId: ownerAgentId,
+        executionWorkspaceSettings: { workspaceStrategy: { baseRef: "release" } } }));
+      if (gate === "paused") mockAgentService.getById.mockResolvedValue({ ...makeAgent(ownerAgentId), status: "paused" });
+      if (gate === "run") mockIssueService.getById.mockResolvedValue(makeIssue({ status: "blocked", assigneeAgentId: ownerAgentId, executionRunId: ownerRunId }));
+      if (gate === "approval") mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([{ status: "pending" }]);
+      if (gate === "budget") mockBudgetService.getInvocationBlock.mockResolvedValue({ scope: "agent", reason: "hard_limit_reached" });
+      if (gate === "blocker") mockIssueService.getDependencyReadiness.mockResolvedValue({ unresolvedBlockerCount: 1 });
+      const res = await request(await createApp(gate === "agent" ? ownerActor() : boardActor(), db)).post(`/api/issues/${issueId}/recovery-actions/resolve`).send(repair);
+      expect([403, 409], JSON.stringify(res.body)).toContain(res.status);
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+      expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+    });
+  });
+
   describe("retrying an escalated disposition repair", () => {
     function seedRetry() {
       mockIssueService.getById.mockResolvedValue(makeIssue({ status: "blocked", assigneeAgentId: ownerAgentId }));
@@ -2535,11 +2651,14 @@ describe("agent issue mutation checkout ownership", () => {
       explanation: "Target agent requires approval before task assignment.",
     }));
     decide.mockImplementation(async (input: { action: string }) => ({
-      allowed: input.action === "issue:mutate",
+      allowed: input.action === "issue:read" || input.action === "issue:mutate",
       action: input.action,
-      reason: input.action === "issue:mutate" ? "allow_self" : "deny_policy_restricted",
+      reason:
+        input.action === "issue:read" || input.action === "issue:mutate"
+          ? "allow_self"
+          : "deny_policy_restricted",
       explanation:
-        input.action === "issue:mutate"
+        input.action === "issue:read" || input.action === "issue:mutate"
           ? "Allowed because the actor owns the assigned issue."
           : "Target agent requires approval before task assignment.",
     }));

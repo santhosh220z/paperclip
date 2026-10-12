@@ -29,6 +29,8 @@ export interface CompanySkillFileInventoryEntry {
 
 export interface CompanySkillVersionFileInventoryEntry extends CompanySkillFileInventoryEntry {
   content: string;
+  encoding?: "utf8" | "base64";
+  executable?: boolean;
 }
 
 export interface CompanySkill {
@@ -154,6 +156,8 @@ export interface CompanySkillCategoryCount {
 }
 
 export interface CompanySkillVersion {
+  repositorySnapshotId?: string | null;
+  repositorySkillPath?: string | null;
   id: string;
   companyId: string;
   companySkillId: string;
@@ -436,6 +440,8 @@ export interface CompanySkillCreateRequest {
 }
 
 export interface CompanySkillFileDetail {
+  encoding?: "utf8" | "base64";
+  executable?: boolean;
   skillId: string;
   path: string;
   kind: CompanySkillFileInventoryEntry["kind"];
@@ -446,6 +452,8 @@ export interface CompanySkillFileDetail {
 }
 
 export interface CompanySkillFileUpdateRequest {
+  encoding?: "utf8" | "base64";
+  executable?: boolean;
   path: string;
   content: string;
 }

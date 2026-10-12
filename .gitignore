@@ -71,6 +71,7 @@ tests/storybook-visual/.cache/
 tests/storybook-visual/.snapshots/
 tests/storybook-visual/baseline-review/
 tests/storybook-visual/test-results/
+tests/storybook-visual/repository-skill-results/
 tests/storybook-visual/playwright-report/
 .superset/
 .superpowers/
@@ -82,3 +83,6 @@ test-results/
 
 # Retained local lifecycle behavior measurements
 .lifecycle-baseline/
+
+# Local native Runner test/session state
+.paperclip-runner-prp/
