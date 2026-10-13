@@ -323,11 +323,29 @@ describe("run failure diagnostics", () => {
     expect(JSON.stringify(result)).not.toContain("private");
   });
 
+  it("includes stop-time ACP activity and closed pending tool-kind labels", () => {
+    const result = sanitizeRunFailureDiagnostics(collectRunFailureDiagnostics(run({ resultJson: {
+      acpLastEventAgeMs: 700, acpLastEventAgeAtStopMs: 14_000_000, acpOldestPendingToolAgeAtStopMs: 14_100_000,
+      acpPendingToolKinds: "execute,unknown",
+    } }), {}));
+    expect(result.execution).toEqual({
+      acpLastEventAgeMs: 700, acpLastEventAgeAtStopMs: 14_000_000, acpOldestPendingToolAgeAtStopMs: 14_100_000,
+      acpPendingToolKinds: "execute,unknown",
+    });
+  });
+
+  it.each(["execute,private command", "", "execute,", "Execute", ["execute"], 1])(
+    "omits pending tool kinds that are not closed labels (%j)", (value) => {
+      const result = collectRunFailureDiagnostics(run({ resultJson: { acpPendingToolKinds: value } }), {});
+      expect(result.execution).toEqual({});
+    },
+  );
+
   it.each([null, -1, Infinity, NaN, 1.5, Number.MAX_SAFE_INTEGER + 1, "private", {}])(
     "omits invalid ACP activity fields (%j)", (value) => {
       const result = collectRunFailureDiagnostics(run({ resultJson: {
         acpLastEventAgeMs: value, acpObservedEventCount: value, acpPendingToolCount: value,
-        acpToolInventoryComplete: value,
+        acpToolInventoryComplete: value, acpLastEventAgeAtStopMs: value, acpOldestPendingToolAgeAtStopMs: value,
       } }), {});
       expect(result.execution).toEqual({});
     },

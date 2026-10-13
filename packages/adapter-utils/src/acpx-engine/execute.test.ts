@@ -33,6 +33,7 @@ import {
   parseGeminiVersionParts,
   referencedSourceContentSignature,
   rewriteGeminiAcpFlagForVersion,
+  summarizeAcpStopActivity,
   summarizeAcpxTurnUsage,
   type AcpxEngineExecutorOptions,
 } from "./execute.js";
@@ -3400,6 +3401,118 @@ describe("ACP activity diagnostics", () => {
       expect(currentNow).toBeGreaterThan(10_000);
     },
   );
+
+  it("snapshots a silent turn's activity when the wall-clock timeout fires, before cancel events", async () => {
+    const root = await makeTempRoot();
+    const cwd = path.join(root, "worktree");
+    await fs.mkdir(cwd, { recursive: true });
+    let currentNow = 1000;
+    let releaseTurn: (() => void) | null = null;
+    const turnCancelled = new Promise<void>((resolve) => { releaseTurn = resolve; });
+    const execute = createAcpxEngineExecutor({
+      now: () => currentNow,
+      createRuntime: () => ({
+        ...buildRuntime(),
+        startTurn: () => ({
+          events: (async function* () {
+            yield { type: "tool_call", toolCallId: "private-id", title: "private command", kind: "execute", status: "in_progress" };
+            // The agent goes silent with the tool still pending.
+            currentNow = 9000;
+            await turnCancelled;
+            // The cancel makes the agent emit a closing event, so the
+            // finalize-time age alone would make this turn look active.
+            currentNow = 9500;
+            yield { type: "status", text: "private closing status" };
+          })(),
+          result: turnCancelled.then(() => ({ status: "cancelled", stopReason: "cancelled" })),
+          cancel: async () => { releaseTurn?.(); },
+        }),
+      }) as never,
+    });
+    const result = await execute({
+      runId: "silent-timeout", agent: { id: "agent-1", companyId: "company-1" }, runtime: {},
+      config: { agent: "custom", agentCommand: "node ./fake-acp.js", stateDir: path.join(root, "state"), cwd, timeoutSec: 1 },
+      context: {}, onMeta: async () => {}, onLog: async () => {},
+    } as never);
+    expect(result.timedOut).toBe(true);
+    expect(result.resultJson).toMatchObject({
+      acpObservedEventCount: 2,
+      acpLastEventAgeMs: 0,
+      acpPendingToolCount: 1,
+      acpLastEventAgeAtStopMs: 8000,
+      acpOldestPendingToolAgeAtStopMs: 8000,
+      acpPendingToolKinds: "execute",
+    });
+    const diagnostics = Object.fromEntries(Object.entries(result.resultJson ?? {}).filter(([key]) => key.startsWith("acp")));
+    expect(JSON.stringify(diagnostics)).not.toContain("private");
+  }, 15_000);
+
+  it("keeps the stalled tool's stop-time age when the cancel closes that tool", async () => {
+    const root = await makeTempRoot();
+    const cwd = path.join(root, "worktree");
+    await fs.mkdir(cwd, { recursive: true });
+    let currentNow = 1000;
+    let releaseTurn: (() => void) | null = null;
+    const turnCancelled = new Promise<void>((resolve) => { releaseTurn = resolve; });
+    const execute = createAcpxEngineExecutor({
+      now: () => currentNow,
+      createRuntime: () => ({
+        ...buildRuntime(),
+        startTurn: () => ({
+          events: (async function* () {
+            yield { type: "tool_call", toolCallId: "private-id", title: "private command", kind: "execute", status: "in_progress" };
+            currentNow = 9000;
+            await turnCancelled;
+            // The cancel closes the stalled tool before finalization runs.
+            currentNow = 9500;
+            yield { type: "tool_call", tag: "tool_call_update", toolCallId: "private-id", status: "cancelled" };
+          })(),
+          result: turnCancelled.then(() => ({ status: "cancelled", stopReason: "cancelled" })),
+          cancel: async () => { releaseTurn?.(); },
+        }),
+      }) as never,
+    });
+    const result = await execute({
+      runId: "cancel-closes-tool", agent: { id: "agent-1", companyId: "company-1" }, runtime: {},
+      config: { agent: "custom", agentCommand: "node ./fake-acp.js", stateDir: path.join(root, "state"), cwd, timeoutSec: 1 },
+      context: {}, onMeta: async () => {}, onLog: async () => {},
+    } as never);
+    expect(result.timedOut).toBe(true);
+    expect(result.resultJson).toMatchObject({
+      acpPendingToolCount: 0,
+      acpLastEventAgeAtStopMs: 8000,
+      acpOldestPendingToolAgeAtStopMs: 8000,
+      acpPendingToolKinds: "execute",
+    });
+    const diagnostics = Object.fromEntries(Object.entries(result.resultJson ?? {}).filter(([key]) => key.startsWith("acp")));
+    expect(JSON.stringify(diagnostics)).not.toContain("private");
+  }, 15_000);
+});
+
+describe("summarizeAcpStopActivity", () => {
+  it("reports nothing for an unstopped turn with no pending tools", () => {
+    expect(summarizeAcpStopActivity(null, 1000, [])).toEqual({});
+  });
+
+  it("reports pending kinds without a stop, and collapses unknown kinds", () => {
+    expect(summarizeAcpStopActivity(null, 1000, [
+      { kind: "fetch", firstSeenAt: 10 }, { kind: "private_tool_name" }, {}, { kind: "fetch" },
+    ])).toEqual({ acpPendingToolKinds: "fetch,unknown" });
+  });
+
+  it("measures ages from the stop and ignores tools first seen after it", () => {
+    expect(summarizeAcpStopActivity(10_000, 4000, [
+      { kind: "execute", firstSeenAt: 3000 }, { kind: "read", firstSeenAt: 12_000 },
+    ])).toEqual({
+      acpLastEventAgeAtStopMs: 6000,
+      acpOldestPendingToolAgeAtStopMs: 7000,
+      acpPendingToolKinds: "execute,read",
+    });
+  });
+
+  it("omits the event age when no event preceded the stop", () => {
+    expect(summarizeAcpStopActivity(10_000, null, [])).toEqual({});
+  });
 });
 
 describe("summarizeAcpxTurnUsage", () => {

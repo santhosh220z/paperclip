@@ -301,6 +301,39 @@ describeEmbeddedPostgres("reportRunFailure", () => {
     expect(mockCaptureRunFailure).toHaveBeenCalledWith(expect.objectContaining({ agentAdapter: "unknown" }));
   });
 
+  function providerQuotaRun(overrides: Partial<typeof heartbeatRuns.$inferSelect> = {}) {
+    return buildRun({
+      error: "ACP agent reported a terminal limit failure.\nYou've hit your session limit · resets 2am (UTC)",
+      errorCode: "provider_quota", executionStage: "dispatching", exitCode: 1, signal: null,
+      resultJson: { errorFamily: "provider_quota", stopReason: "adapter_failed" }, ...overrides,
+    });
+  }
+
+  it.each(["claude_local", "codex_local"])("keeps a classified %s provider quota wait local", async (adapterType) => {
+    await seedCompanyAndAgent({ adapterType });
+    const [run] = await db.insert(heartbeatRuns).values(providerQuotaRun()).returning();
+    const before = structuredClone(run);
+    for (const phase of [undefined, "execute"] as const) await reportRunFailure(db, run!, { phase });
+    expect(mockCaptureRunFailure).not.toHaveBeenCalled();
+    expect(await db.select().from(heartbeatRuns)).toEqual([before]);
+  });
+
+  it.each([
+    { status: "timed_out" }, { status: "cancelled", startedAt: new Date(0) }, { signal: "SIGTERM" },
+    { errorCode: "adapter_failed" }, { errorCode: "claude_transient_upstream" },
+    { resultJson: {} }, { resultJson: null }, { resultJson: { errorFamily: "transient_upstream" } },
+  ])("reports a provider quota outcome without matching adapter evidence: %j", async (overrides) => {
+    await seedCompanyAndAgent({ adapterType: "claude_local" });
+    await reportRunFailure(db, providerQuotaRun(overrides), { phase: "execute" });
+    expect(mockCaptureRunFailure).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a provider quota code reportable during setup", async () => {
+    await seedCompanyAndAgent({ adapterType: "claude_local" });
+    await reportRunFailure(db, providerQuotaRun(), { phase: "setup" });
+    expect(mockCaptureRunFailure).toHaveBeenCalledOnce();
+  });
+
   function aiSelectionRun(overrides: Partial<typeof heartbeatRuns.$inferSelect> = {}) {
     return buildRun({
       errorCode: "configuration_incomplete",

@@ -1,3 +1,8 @@
+import { idleWorkSnapshot } from "../services/task-admission.js";
+import * as activityLogModule from "../services/activity-log.js";
+import { chatSlackManagerGrants, chatSlackRegistrations, toolOauthStates } from "@paperclipai/db";
+import type { PaperclipCloudConnector, SealedConnectorCredentials } from "../services/paperclip-cloud-connector.js";
+import { buildSlackAppManifest, SLACK_MANAGER_SCOPES } from "@paperclipai/shared";
 import { registerChatActionWork, dueChatAction } from "../services/chat-action-work.js";
 import { createDeliveryWorkCoordinator } from "../services/delivery-work-coordinator.js";
 import { registerChatDeliveryWork } from "../services/chat-delivery-work.js";
@@ -7,14 +12,11 @@ import { aiConnectionService } from "../services/ai-connections.js";
 import { fastResponseService } from "../services/fast-responses.js";
 import { fastResponseReceipt } from "../services/fast-response-provider.js";
 import { fastResponseRequests } from "@paperclipai/db";
-import { chatSlackRegistrations, toolOauthStates } from "@paperclipai/db";
-import { buildSlackAppManifest } from "@paperclipai/shared";
 import { toolAccessService } from "../services/tool-access.js";
 import { toolActionRequests, toolInvocations } from "@paperclipai/db";
 import { GitHubPublicationLeaseLost, withGitHubPublicationLease } from "../services/chat-github-publication-lease.js";
 import { secretService } from "../services/secrets.js";
 import { githubChatWizardService } from "../services/chat-github-wizard.js";
-import type { PaperclipCloudConnector } from "../services/paperclip-cloud-connector.js";
 import { dispatchGitHubBotCloudEvent } from "../services/chat-github-cloud-ingress.js";
 import { githubChatManagementService } from "../services/chat-github-management.js";
 import { githubChatReviewService } from "../services/chat-github-reviews.js";
@@ -102,6 +104,8 @@ import {
   nativeRunFinalizations,
   environmentLeases,
   principalPermissionGrants,
+  projects,
+  projectWorkspaces,
   toolConnections,
 } from "@paperclipai/db";
 import { defaultGitHubReviewPolicy, type ChatProvider } from "@paperclipai/shared";
@@ -4626,7 +4630,7 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
         changes: { body: { from: "No mention" } },
       };
       await f.service.handleWebhook(f.endpoint.publicId, "github", signedGitHubWebhookRequest({ event, delivery: randomUUID(), payload, webhookSecret: f.webhookSecret }));
-      await expect.poll(async () => (await readChatConversationsByEndpointId(f.endpoint.id)).length).toBe(1);
+      await expect.poll(async () => (await readChatConversationsByEndpointId(f.endpoint.id)).length, { timeout: 10_000 }).toBe(1);
       const deliveries = await readChatDeliveriesByEndpointId(f.endpoint.id);
       expect(deliveries).toEqual(expect.arrayContaining([
         expect.objectContaining({ eventKind: "message_updated" }),
@@ -6262,7 +6266,9 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       const token = `xoxb-bot-token-canary-${id}`;
       const scopes = buildSlackAppManifest({ app: appDetails, agentName: "Maya", webhookUrl: "https://paperclip.example/hook" }).oauth_config.scopes.bot;
       const state = {
-        failCreate: false, failValidate: false, failInventory: false, failAuth: false, failExchange: false,
+        managedAccessToken: token, rejectOldBotToken: false,
+        userListCursor: null as string | null, userListNextCursor: "",
+        managedBotAppId: appId, grantedScopes: scopes, managedError: null as string | null, failCreate: false, failValidate: false, failInventory: false, failAuth: false, failExchange: false,
         failManifestUpdate: false, timeoutManifestUpdate: false,
         beforeManifestUpdate: null as null | (() => Promise<void>),
         failIcon: false, timeoutIcon: false, failUser: false, failWelcome: false, timeoutWelcome: false,
@@ -6270,20 +6276,23 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
         user: { id: installerId, team_id: "TAUTO", name: "installer", real_name: "Installing Person", is_bot: false, deleted: false },
         beforeIcon: null as null | (() => Promise<void>),
         beforeAuth: null as null | (() => Promise<void>),
+        beforeExchange: null as null | (() => Promise<void>),
         oauth: { ok: true, app_id: appId, token_type: "bot", access_token: token, team: { id: "TAUTO" }, bot_user_id: botId, authed_user: { id: installerId }, scope: scopes.join(",") },
       };
       const fallback = fakeSlackFetch(botId);
       const provider = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
         const url = String(input);
+        if (url.endsWith("bots.info")) return Response.json({ ok: true, bot: { id: "BMANAGED", app_id: state.managedBotAppId, user_id: botId, deleted: false } });
+        if (url.endsWith("apps.managedInstall")) return Response.json(state.managedError ? { ok: false, error: state.managedError } : { ok: true, app_id: appId, team_id: "TAUTO", api_access_tokens: { bot_access_token: state.managedAccessToken } });
         if (url.endsWith("apps.manifest.validate")) return Response.json(state.failValidate ? { ok: false, error: "invalid_auth", detail: configToken } : { ok: true });
         if (url.endsWith("apps.manifest.create")) {
           if (state.failCreate) throw new Error(`Timeout ${configToken} ${clientSecret}`);
-          return Response.json({ ok: true, app_id: appId, credentials: { client_id: "123.456", client_secret: clientSecret, signing_secret: signingSecret } });
+          return Response.json({ ok: true, app_id: appId, team_id: "TAUTO", credentials: { client_id: "123.456", client_secret: clientSecret, signing_secret: signingSecret } });
         }
         if (url.endsWith("apps.manifest.update")) {
           await state.beforeManifestUpdate?.();
           if (state.timeoutManifestUpdate) throw new Error(`Manifest timeout ${configToken} ${clientSecret}`);
-          return Response.json(state.failManifestUpdate ? { ok: false, error: "invalid_auth", detail: configToken } : { ok: true, app_id: appId });
+          return Response.json(state.failManifestUpdate ? { ok: false, error: "invalid_auth", detail: configToken } : { ok: true, app_id: appId, permissions_updated: true });
         }
         if (url.endsWith("apps.icon.set")) {
           await state.beforeIcon?.();
@@ -6291,13 +6300,19 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
           return Response.json(state.failIcon ? { ok: false, error: "missing_scope", detail: `${configToken} ${signingSecret}` } : { ok: true });
         }
         if (url.endsWith("oauth.v2.access")) {
+          await state.beforeExchange?.();
           if (state.failExchange) throw new Error(`Timeout ${clientSecret} ${token}`);
           return Response.json(state.oauth);
         }
         if (url.endsWith("auth.test")) {
           await state.beforeAuth?.();
+          if (state.rejectOldBotToken && new Headers(init?.headers).get("authorization") !== `Bearer ${state.managedAccessToken}`) return Response.json({ ok: false, error: "token_revoked" });
           if (state.failAuth) throw new Error(`Temporary failure ${token}`);
-          return Response.json({ ok: true, team_id: "TAUTO", user_id: botId, user: `maya-${id}`, team: "Test workspace" }, { headers: { "x-oauth-scopes": scopes.join(",") } });
+          return Response.json({ ok: true, team_id: "TAUTO", user_id: botId, bot_id: "BMANAGED", user: `maya-${id}`, team: "Test workspace" }, { headers: { "x-oauth-scopes": state.grantedScopes.join(",") } });
+        }
+        if (url.endsWith("users.list")) {
+          state.userListCursor = new URLSearchParams(String(init?.body)).get("cursor");
+          return Response.json({ ok: true, members: [state.user], response_metadata: { next_cursor: state.userListNextCursor } });
         }
         if (url.endsWith("users.info")) {
           await state.beforeUser?.();
@@ -6323,6 +6338,408 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       const install = async () => new URL((await service.slackRegistration.install(endpoint.id, actor)).authorizationUrl).searchParams.get("state")!;
       return { ...company, endpoint, service, sdk, app, state, provider, create, install, createInput, token, appId, botId, installerId, avatarBytes, renderAvatar };
     }
+    async function managedFixture() {
+      const broker = {
+        getCapabilities: vi.fn(async () => ["slack.manager"]),
+        getSlackManagerAppId: vi.fn(async () => "AMANAGER"),
+        startAuthorization: vi.fn(async (_input: { returnState: string }) => ({ authorizationUrl: "https://slack.com/oauth/v2/authorize?state=broker", expiresAt: new Date(Date.now() + 600_000).toISOString() })),
+        claim: vi.fn(), refresh: vi.fn(), revoke: vi.fn(async () => undefined),
+      };
+      const f = await fixture({ slackManaged: { enabled: true, broker: broker as unknown as PaperclipCloudConnector } });
+      const credentials: SealedConnectorCredentials = { v: 1, provider: "slack", profile: "slack.manager", instanceId: "test", environment: "staging", subject: actor.userId, companyId: f.companyId,
+        accessToken: "xoxe.xoxp-manager-access-canary", refreshToken: "xoxe-manager-refresh-canary", tokenType: "user", accessTokenExpiresAt: new Date(Date.now() + 43_200_000).toISOString(), refreshTokenExpiresAt: null,
+        scopes: [...SLACK_MANAGER_SCOPES], slackManager: { appId: "AMANAGER", workspaceId: "TAUTO", workspaceName: "Test workspace", userId: f.installerId } };
+      broker.claim.mockResolvedValue(credentials);
+      broker.refresh.mockResolvedValue({ ...credentials, accessToken: "xoxe.rotated-canary", refreshToken: "xoxe.rotated-refresh-canary" });
+      await f.service.update(f.endpoint.id, { slackSetupMethod: "managed" }, actor.userId);
+      const grants = f.service.slackRegistration.managerGrants;
+      const authorize = async () => { await grants.authorize(f.endpoint.id, actor); return broker.startAuthorization.mock.calls.at(-1)![0].returnState; };
+      const authorizeState = await authorize();
+      await grants.complete(authorizeState, "claim-canary", null, actor);
+      const choices = await grants.choices(f.companyId, actor);
+      expect(choices.workspaces).toHaveLength(1);
+      const grantId = choices.workspaces[0]!.grantId;
+      const input = { requestId: randomUUID(), grantId };
+      const provision = () => f.service.slackRegistration.managed.provision(f.endpoint.id, actor, input);
+      return { ...f, broker, credentials, grants, authorize, authorizeState, grantId, input, provision };
+    }
+    describe("Slack test messages", () => {
+      const posts = (f: Awaited<ReturnType<typeof managedFixture>>) => f.provider.mock.calls.filter(([url]) => String(url).endsWith("chat.postMessage"));
+      it("sends to the current linked user and reuses a durable result on duplicate requests", async () => {
+        const f = await managedFixture(); await f.provision(); f.provider.mockClear();
+        const input = { requestId: randomUUID() };
+        const result = await request(f.app).post(`/api/chat-endpoints/${f.endpoint.id}/slack/test-message`).send(input).expect(200);
+        expect(result.body).toEqual({ status: "sent", slackUrl: "https://app.slack.com/client/TAUTO/DWELCOME" });
+        await f.service.sendSlackTestMessage(f.endpoint.id, actor, input);
+        expect(posts(f)).toHaveLength(1);
+        expect(new URLSearchParams(String(posts(f)[0]![1]!.body)).get("channel")).toBe(f.installerId);
+      });
+      it("links the actor's own manager identity without requiring a connect command", async () => {
+        const f = await managedFixture(); await f.provision();
+        await db.delete(chatIdentityLinks).where(eq(chatIdentityLinks.endpointId, f.endpoint.id));
+        expect(await f.service.sendSlackTestMessage(f.endpoint.id, actor, { requestId: randomUUID() })).toMatchObject({ status: "sent" });
+        expect(await db.select().from(chatIdentityLinks).where(eq(chatIdentityLinks.endpointId, f.endpoint.id))).toEqual([expect.objectContaining({ paperclipUserId: actor.userId, status: "linked" })]);
+      });
+      it("requires a private Slack challenge for an unknown account before linking and sending the test", async () => {
+        const f = await managedFixture(); await f.provision();
+        await db.delete(chatIdentityLinks).where(eq(chatIdentityLinks.endpointId, f.endpoint.id));
+        await db.update(chatSlackManagerGrants).set({ userId: "another-user" }).where(eq(chatSlackManagerGrants.id, f.grantId));
+        f.provider.mockClear(); const input = { requestId: randomUUID() };
+        expect(await f.service.sendSlackTestMessage(f.endpoint.id, actor, input)).toEqual({ status: "connection_required", accounts: [{ id: f.installerId, name: "Installing Person" }], nextCursor: null });
+        expect(posts(f)).toHaveLength(0);
+        const pending = await f.service.sendSlackTestMessage(f.endpoint.id, actor, { ...input, slackUserId: f.installerId });
+        expect(pending.status).toBe("connection_pending");
+        const links = await db.select().from(chatIdentityLinks).where(eq(chatIdentityLinks.endpointId, f.endpoint.id));
+        expect(links).toEqual([expect.objectContaining({ status: "pending", paperclipUserId: null })]);
+        const fields = new URLSearchParams(String(posts(f)[0]![1]!.body));
+        expect(fields.get("text")).not.toContain("This is your test message");
+        const blocks = JSON.parse(fields.get("blocks")!);
+        const invitationUrl = /<([^|]+)\|/.exec(blocks[1].text.text)![1]!;
+        const token = new URL(invitationUrl).searchParams.get("token")!;
+        expect(JSON.stringify(pending)).not.toContain(token);
+        expect(await f.service.sendSlackTestMessage(f.endpoint.id, actor, input)).toEqual(pending);
+        expect(posts(f)).toHaveLength(1);
+        await f.service.confirmIdentityLink(token, actor.userId);
+        expect(await f.service.sendSlackTestMessage(f.endpoint.id, actor, input)).toMatchObject({ status: "sent" });
+        expect(new URLSearchParams(String(posts(f).at(-1)![1]!.body)).get("text")).toContain("This is your test message");
+      });
+      it("loads another workspace page instead of truncating account discovery", async () => {
+        const f = await managedFixture(); await f.provision();
+        await db.delete(chatIdentityLinks).where(eq(chatIdentityLinks.endpointId, f.endpoint.id));
+        await db.update(chatSlackManagerGrants).set({ userId: "another-user" }).where(eq(chatSlackManagerGrants.id, f.grantId));
+        f.provider.mockClear(); f.state.userListNextCursor = "next-page";
+        const input = { requestId: randomUUID() };
+        expect(await f.service.sendSlackTestMessage(f.endpoint.id, actor, input)).toMatchObject({ status: "connection_required", nextCursor: "next-page" });
+        f.state.userListNextCursor = "";
+        expect(await f.service.sendSlackTestMessage(f.endpoint.id, actor, { ...input, accountCursor: "next-page" })).toMatchObject({ status: "connection_required", nextCursor: null });
+        expect(f.state.userListCursor).toBe("next-page");
+        expect(posts(f)).toHaveLength(0);
+      });
+      it("does not downgrade confirmed delivery when activity logging fails", async () => {
+        const f = await managedFixture(); await f.provision(); f.provider.mockClear();
+        const original = activityLogModule.logActivity;
+        const audit = vi.spyOn(activityLogModule, "logActivity").mockImplementation(async (database, entry) => {
+          if (entry.action === "chat_slack.test_message_sent") throw new Error("Synthetic activity failure");
+          return original(database, entry);
+        });
+        onTestFinished(() => audit.mockRestore());
+        const input = { requestId: randomUUID() };
+        expect(await f.service.sendSlackTestMessage(f.endpoint.id, actor, input)).toMatchObject({ status: "sent" });
+        expect(await f.service.sendSlackTestMessage(f.endpoint.id, actor, input)).toMatchObject({ status: "sent" });
+        expect(posts(f)).toHaveLength(1);
+      });
+      it("does not restore revoked access or take another user's identity", async () => {
+        const f = await managedFixture(); await f.provision(); f.provider.mockClear();
+        await db.update(chatIdentityLinks).set({ status: "revoked" }).where(eq(chatIdentityLinks.endpointId, f.endpoint.id));
+        await expect(f.service.sendSlackTestMessage(f.endpoint.id, actor, { requestId: randomUUID() })).rejects.toThrow("existing link");
+        await db.update(chatIdentityLinks).set({ status: "linked", paperclipUserId: "another-user" }).where(eq(chatIdentityLinks.endpointId, f.endpoint.id));
+        await expect(f.service.sendSlackTestMessage(f.endpoint.id, actor, { requestId: randomUUID(), slackUserId: f.installerId })).rejects.toThrow("existing link");
+        expect(posts(f)).toHaveLength(0);
+      });
+      it("rejects wrong-workspace users, disabled DMs, and membership revocation", async () => {
+        const f = await managedFixture(); await f.provision(); f.provider.mockClear();
+        f.state.user.team_id = "TOTHER";
+        await expect(f.service.sendSlackTestMessage(f.endpoint.id, actor, { requestId: randomUUID() })).rejects.toThrow("personal Slack account");
+        f.state.user.team_id = "TAUTO";
+        await db.update(chatEndpoints).set({ allowDirectMessages: false }).where(eq(chatEndpoints.id, f.endpoint.id));
+        await expect(f.service.sendSlackTestMessage(f.endpoint.id, actor, { requestId: randomUUID() })).rejects.toThrow("Enable direct messages");
+        await db.update(chatEndpoints).set({ allowDirectMessages: true }).where(eq(chatEndpoints.id, f.endpoint.id));
+        await db.update(companyMemberships).set({ status: "inactive" }).where(and(eq(companyMemberships.companyId, f.companyId), eq(companyMemberships.principalId, actor.userId)));
+        await expect(f.service.sendSlackTestMessage(f.endpoint.id, actor, { requestId: randomUUID() })).rejects.toThrow("active Paperclip account");
+        expect(posts(f)).toHaveLength(0);
+      });
+      it("redacts provider failures and never retries an ambiguous send", async () => {
+        const f = await managedFixture(); await f.provision(); f.provider.mockClear(); f.state.timeoutWelcome = true;
+        const input = { requestId: randomUUID() };
+        const result = await request(f.app).post(`/api/chat-endpoints/${f.endpoint.id}/slack/test-message`).send(input).expect(422);
+        expect(JSON.stringify(result.body)).not.toContain("canary");
+        await expect(f.service.sendSlackTestMessage(f.endpoint.id, actor, input)).rejects.toThrow("may already have been sent");
+        expect(posts(f)).toHaveLength(1);
+        const actions = await db.select().from(chatActions).where(and(eq(chatActions.endpointId, f.endpoint.id), eq(chatActions.kind, "slack_test_message")));
+        expect(JSON.stringify(actions)).not.toContain("canary");
+        expect(actions[0]!.status).toBe("uncertain");
+      });
+    });
+    describe("managed Slack", () => {
+      it("keeps open-source setup independent of the broker", async () => {
+        const f = await fixture();
+        expect(await f.service.slackRegistration.managerGrants.choices(f.companyId, actor)).toEqual({ managedAvailable: false, defaultMethod: "automatic", workspaces: [] });
+        await f.create();
+        expect((await f.service.get(f.endpoint.id)).setup.slackSetupMethod).toBe("automatic");
+        await expect(f.service.update(f.endpoint.id, { slackSetupMethod: "managed" }, actor.userId)).rejects.toThrow();
+      });
+      it("keeps configured Cloud drafts managed when the broker profile disappears", async () => {
+        const f = await managedFixture();
+        f.broker.getSlackManagerAppId.mockResolvedValue(null);
+        expect(f.grants.defaultMethod()).toBe("managed");
+        expect(await f.grants.choices(f.companyId, actor)).toEqual({ managedAvailable: false, defaultMethod: "managed", workspaces: [] });
+        const next = await f.service.create(f.companyId, { provider: "slack", assignedAgentId: f.assignedAgentId }, actor.userId);
+        expect(next.setup.slackSetupMethod).toBe("managed");
+        await expect(f.provision()).rejects.toThrow();
+      });
+      it("creates and installs once, uploads the avatar and links only the manager grant owner", async () => {
+        const f = await managedFixture();
+        await Promise.all([f.provision(), f.provision()]);
+        const saved = await f.service.get(f.endpoint.id);
+        expect(saved.setup).toMatchObject({ slackSetupMethod: "managed", slackRegistration: { status: "configured", appId: f.appId }, slackAvatar: { status: "uploaded" }, slackAccount: { status: "linked", paperclipUserId: actor.userId, externalUserId: f.installerId } });
+        expect(f.provider.mock.calls.filter(([url]) => String(url).endsWith("apps.manifest.create"))).toHaveLength(1);
+        expect(f.provider.mock.calls.filter(([url]) => String(url).endsWith("apps.managedInstall"))).toHaveLength(1);
+        const activities = await db.select().from(activityLog).where(eq(activityLog.companyId, f.companyId));
+        for (const secret of [f.credentials.accessToken, f.credentials.refreshToken!, f.token, clientSecret, signingSecret, "claim-canary"]) expect(JSON.stringify({ saved, activities, choices: await f.grants.choices(f.companyId, actor) })).not.toContain(secret);
+        await expect(f.service.update(f.endpoint.id, { slackSetupMethod: "automatic" }, actor.userId)).rejects.toThrow();
+      });
+      it("reuses the same personal workspace grant for another draft without another authorization", async () => {
+        const f = await managedFixture();
+        const draft = await f.service.create(f.companyId, { provider: "slack", assignedAgentId: f.assignedAgentId, slackSetupMethod: "managed" }, actor.userId);
+        expect((await f.grants.choices(f.companyId, actor)).workspaces[0]!.grantId).toBe(f.grantId);
+        const otherActor = { ...actor, userId: "another-user", bypassPermissionCheck: true };
+        expect((await f.grants.choices(f.companyId, otherActor)).workspaces).toEqual([]);
+        await expect(f.service.slackRegistration.managed.provision(draft.id, otherActor, { ...f.input, requestId: randomUUID() })).rejects.toThrow();
+        expect(f.broker.startAuthorization).toHaveBeenCalledTimes(1);
+      });
+      it("installs a second bot using the same grant without new manager consent", async () => {
+        const f = await managedFixture(); await f.provision();
+        const secondBot = `${f.botId}SECOND`;
+        const secondApp = `${f.appId}SECOND`;
+        const scopes = buildSlackAppManifest({ app: appDetails, agentName: "Maya", webhookUrl: "https://paperclip.example/hook" }).oauth_config.scopes.bot;
+        const provider: typeof fetch = async (input, init) => {
+          const url = String(input);
+          if (url.endsWith("apps.manifest.create")) return Response.json({ ok: true, app_id: secondApp, team_id: "TAUTO", credentials: { client_id: "222.333", client_secret: clientSecret, signing_secret: signingSecret } });
+          if (url.endsWith("apps.managedInstall")) return Response.json({ ok: true, app_id: secondApp, team_id: "TAUTO", api_access_tokens: { bot_access_token: "xoxb-second-managed" } });
+          if (url.endsWith("auth.test")) return Response.json({ ok: true, team_id: "TAUTO", user_id: secondBot, bot_id: "BSECOND", team: "Test workspace" }, { headers: { "x-oauth-scopes": scopes.join(",") } });
+          if (url.endsWith("bots.info")) return Response.json({ ok: true, bot: { id: "BSECOND", app_id: secondApp, user_id: secondBot, deleted: false } });
+          return f.provider(input, init);
+        };
+        const { service } = createService(new FakeChatSdkRuntime(), provider, { renderSlackAvatar: f.renderAvatar, slackManaged: { enabled: true, broker: f.broker as unknown as PaperclipCloudConnector } });
+        const second = await service.create(f.companyId, { provider: "slack", assignedAgentId: f.assignedAgentId, slackSetupMethod: "managed", slackApp: appDetails }, actor.userId);
+        await service.slackRegistration.managed.provision(second.id, actor, { grantId: f.grantId, requestId: randomUUID() });
+        expect((await service.get(second.id)).setup.slackRegistration).toMatchObject({ status: "configured", appId: secondApp });
+        expect(f.broker.startAuthorization).toHaveBeenCalledTimes(1);
+        expect(f.broker.claim).toHaveBeenCalledTimes(1);
+      });
+      it("rejects missing tool scopes before activating a managed bot", async () => {
+        const f = await managedFixture(); f.state.grantedScopes = [];
+        await f.provision();
+        const saved = await f.service.get(f.endpoint.id);
+        expect(saved.providerAccountId).toBeNull();
+        expect(saved.setup.slackRegistration).toMatchObject({ status: "credentials_saved", errorCode: "slack_install_scopes_missing" });
+      });
+      it.each(["revoked", "attention", "active"] as const)("reinstalls the configured app on an explicit %s reconnect", async status => {
+        const f = await managedFixture(); await f.provision(); f.provider.mockClear();
+        await db.update(chatEndpoints).set({ status }).where(eq(chatEndpoints.id, f.endpoint.id));
+        f.state.managedAccessToken = `xoxb-reconnected-${f.botId}`; f.state.rejectOldBotToken = true;
+        const reconnectInput = { ...f.input, requestId: randomUUID(), reconnect: true };
+        await f.service.slackRegistration.managed.provision(f.endpoint.id, actor, reconnectInput);
+        expect(f.provider.mock.calls.filter(([url]) => String(url).endsWith("apps.managedInstall"))).toHaveLength(1);
+        expect(f.provider.mock.calls.filter(([url]) => String(url).endsWith("apps.manifest.create"))).toHaveLength(0);
+        expect((await f.service.get(f.endpoint.id)).status).not.toBe("revoked");
+        expect((await f.service.get(f.endpoint.id)).setup.slackRegistration).toMatchObject({ status: "configured", appId: f.appId });
+        await f.service.slackRegistration.managed.provision(f.endpoint.id, actor, reconnectInput);
+        await f.provision();
+        expect(f.provider.mock.calls.filter(([url]) => String(url).endsWith("apps.managedInstall"))).toHaveLength(1);
+      });
+      it("preserves configured-app reconnect intent when managed installation fails", async () => {
+        const f = await managedFixture(); await f.provision(); f.provider.mockClear();
+        await db.update(chatEndpoints).set({ status: "revoked" }).where(eq(chatEndpoints.id, f.endpoint.id));
+        f.state.managedError = "temporary_error";
+        await f.provision();
+        expect((await f.service.get(f.endpoint.id)).setup.slackRegistration).toMatchObject({ status: "install", appId: f.appId });
+        f.state.managedError = null;
+        await f.provision();
+        expect((await f.service.get(f.endpoint.id)).setup.slackRegistration?.status).toBe("configured");
+        expect(f.provider.mock.calls.filter(([url]) => String(url).endsWith("apps.manifest.create"))).toHaveLength(0);
+      });
+      it("reinstalls the saved app after missing bot scopes without creating another app", async () => {
+        const f = await managedFixture(); const scopes = f.state.grantedScopes;
+        f.state.grantedScopes = []; await f.provision();
+        f.state.grantedScopes = scopes; await f.provision();
+        expect((await f.service.get(f.endpoint.id)).setup.slackRegistration?.status).toBe("configured");
+        expect(f.provider.mock.calls.filter(([url]) => String(url).endsWith("apps.managedInstall"))).toHaveLength(2);
+        expect(f.provider.mock.calls.filter(([url]) => String(url).endsWith("apps.manifest.create"))).toHaveLength(1);
+      });
+      it("retains reinstall intent after a provider failure instead of retrying rejected credentials", async () => {
+        const f = await managedFixture(); const scopes = f.state.grantedScopes;
+        f.state.grantedScopes = []; await f.provision();
+        f.state.managedError = "internal_error"; await f.provision();
+        expect((await f.service.get(f.endpoint.id)).setup.slackRegistration).toMatchObject({ status: "install", errorCode: "slack_provider_failure" });
+        f.state.managedError = null; f.state.grantedScopes = scopes; await f.provision();
+        expect((await f.service.get(f.endpoint.id)).setup.slackRegistration?.status).toBe("configured");
+        expect(f.provider.mock.calls.filter(([url]) => String(url).endsWith("apps.managedInstall"))).toHaveLength(3);
+        expect(f.provider.mock.calls.filter(([url]) => String(url).endsWith("apps.manifest.create"))).toHaveLength(1);
+      });
+      it("clears a manager reconnect error after renewing the bound grant", async () => {
+        const f = await managedFixture(); f.state.managedError = "invalid_auth"; await f.provision();
+        expect((await f.service.get(f.endpoint.id)).setup.slackRegistration?.errorCode).toBe("slack_manager_reauthorize");
+        await f.grants.complete(await f.authorize(), "new-claim", null, actor);
+        expect((await f.service.get(f.endpoint.id)).setup.slackRegistration?.errorCode).toBeNull();
+        f.state.managedError = null; await f.provision();
+        expect((await f.service.get(f.endpoint.id)).setup.slackRegistration?.status).toBe("configured");
+        expect(f.provider.mock.calls.filter(([url]) => String(url).endsWith("apps.manifest.create"))).toHaveLength(1);
+      });
+      it("reconnects a rejected manager token without losing pending manifest configuration", async () => {
+        const f = await managedFixture(); f.state.failManifestUpdate = true; await f.provision();
+        expect((await f.service.get(f.endpoint.id)).setup.slackRegistration?.errorCode).toBe("slack_manifest_update_pending");
+        expect((await f.grants.choices(f.companyId, actor)).workspaces).toEqual([]);
+        expect((await f.grants.get(f.grantId, f.companyId, actor)).status).toBe("reauthorize");
+        await f.grants.complete(await f.authorize(), "new-claim", null, actor);
+        f.state.failManifestUpdate = false; await f.provision();
+        expect((await f.service.get(f.endpoint.id)).setup.slackRegistration?.status).toBe("configured");
+        expect((await f.service.get(f.endpoint.id)).setup.slackAvatar?.status).toBe("uploaded");
+        expect(f.provider.mock.calls.filter(([url]) => String(url).endsWith("apps.icon.set"))).toHaveLength(1);
+        expect(f.provider.mock.calls.filter(([url]) => String(url).endsWith("apps.manifest.create"))).toHaveLength(1);
+      });
+      it("does not restore a revoked grant when an in-flight refresh returns", async () => {
+        const f = await managedFixture();
+        await db.update(chatSlackManagerGrants).set({ expiresAt: new Date(0) }).where(eq(chatSlackManagerGrants.id, f.grantId));
+        f.broker.refresh.mockImplementation(async () => {
+          await f.grants.revoke(f.grantId, f.companyId, actor);
+          return f.credentials;
+        });
+        await expect(f.grants.token(f.grantId, f.companyId, actor)).rejects.toThrow();
+        expect((await f.grants.get(f.grantId, f.companyId, actor)).status).toBe("revoked");
+      });
+      it("claims concurrent manager callbacks once", async () => {
+        const f = await managedFixture(); const state = await f.authorize();
+        const results = await Promise.allSettled([1, 2].map(() => f.grants.complete(state, "claim", null, actor)));
+        expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
+        expect(f.broker.claim).toHaveBeenCalledTimes(2);
+      });
+      it("atomically consumes manager state and rejects wrong actors and expired attempts", async () => {
+        const f = await managedFixture();
+        await expect(f.grants.complete(f.authorizeState, "replay", null, actor)).rejects.toThrow();
+        const state = await f.authorize();
+        await expect(f.grants.complete(state, "claim", null, { ...actor, userId: "another-user", bypassPermissionCheck: true })).rejects.toThrow();
+        await db.update(toolOauthStates).set({ expiresAt: new Date(0) }).where(eq(toolOauthStates.state, state));
+        await expect(f.grants.complete(state, "claim", null, actor)).rejects.toThrow();
+        expect(f.broker.claim).toHaveBeenCalledTimes(1);
+      });
+      it("preserves declined manager authorization as a safe recoverable outcome", async () => {
+        const f = await managedFixture();
+        await f.grants.complete(await f.authorize(), null, "access_denied", actor);
+        expect((await f.service.get(f.endpoint.id)).setup.slackManagerError).toBe("slack_install_declined");
+      });
+      it("resumes saved installation credentials after inventory failure without creating or reinstalling", async () => {
+        const f = await managedFixture(); f.state.failInventory = true;
+        await f.provision();
+        expect((await f.service.slackRegistration.registration(f.endpoint.id))?.status).toBe("credentials_saved");
+        f.state.failInventory = false; await f.provision();
+        expect((await f.service.get(f.endpoint.id)).setup.slackRegistration?.status).toBe("configured");
+        expect(f.provider.mock.calls.filter(([url]) => String(url).endsWith("apps.managedInstall"))).toHaveLength(1);
+        expect(f.provider.mock.calls.filter(([url]) => String(url).endsWith("apps.manifest.create"))).toHaveLength(1);
+      });
+      it("never recreates an uncertain app", async () => {
+        const f = await managedFixture(); f.state.failCreate = true;
+        await f.provision(); await f.provision();
+        expect((await f.service.get(f.endpoint.id)).setup.slackRegistration?.status).toBe("uncertain");
+        expect(f.provider.mock.calls.filter(([url]) => String(url).endsWith("apps.manifest.create"))).toHaveLength(1);
+      });
+      it("uses bound OAuth for approval fallback and rejects a different installer", async () => {
+        const f = await managedFixture(); f.state.managedError = "app_approval_request_eligible";
+        const result = await f.provision();
+        const state = new URL(result.authorization!.authorizationUrl).searchParams.get("state")!;
+        f.state.oauth.authed_user.id = "UOTHER";
+        await f.service.slackRegistration.complete(state, "code-canary", null, actor);
+        expect((await f.service.get(f.endpoint.id)).setup.slackRegistration?.errorCode).toBe("slack_install_identity_mismatch");
+        expect((await f.service.get(f.endpoint.id)).providerAccountId).toBeNull();
+      });
+      it("does not activate a bot when the manager grant is revoked during child OAuth", async () => {
+        const f = await managedFixture(); f.state.managedError = "app_approval_request_eligible";
+        const result = await f.provision();
+        const state = new URL(result.authorization!.authorizationUrl).searchParams.get("state")!;
+        f.state.beforeExchange = () => f.grants.revoke(f.grantId, f.companyId, actor);
+        await f.service.slackRegistration.complete(state, "code-canary", null, actor);
+        const saved = await f.service.get(f.endpoint.id);
+        expect(saved.providerAccountId).toBeNull();
+        expect(saved.setup.slackRegistration?.errorCode).toBe("slack_install_identity_mismatch");
+      });
+      it("uses the held transaction for grant queries without acquiring another pool connection", async () => {
+        const f = await managedFixture();
+        const transactionContext = new AsyncLocalStorage<boolean>();
+        const originalTransaction = db.transaction.bind(db);
+        const transactionSpy = vi.spyOn(db, "transaction").mockImplementation((work, ...args) =>
+          originalTransaction(tx => transactionContext.run(true, () => work(tx)), ...args));
+        const querySpies = (["select", "insert", "update", "delete", "execute"] as const).map(method => {
+          const original = db[method].bind(db) as (...args: unknown[]) => unknown;
+          return vi.spyOn(db, method).mockImplementation(((...args: unknown[]) => {
+            if (transactionContext.getStore()) throw new Error("Acquired outer pool connection from held transaction");
+            return original(...args);
+          }) as never);
+        });
+        try {
+          await f.grants.token(f.grantId, f.companyId, actor);
+          await db.update(chatSlackManagerGrants).set({ expiresAt: new Date(0) }).where(eq(chatSlackManagerGrants.id, f.grantId));
+          await f.grants.token(f.grantId, f.companyId, actor);
+          expect(f.broker.refresh).toHaveBeenCalledTimes(1);
+          await f.grants.request(f.grantId, f.companyId, actor, "apps.manifest.validate", { manifest: "{}" });
+          await f.grants.complete(await f.authorize(), "renewed-claim", null, actor);
+          expect((await f.service.get(f.endpoint.id)).setup.slackManagerError).toBeUndefined();
+          await f.grants.revoke(f.grantId, f.companyId, actor);
+          expect(f.broker.revoke).toHaveBeenCalledTimes(2);
+        } finally {
+          transactionSpy.mockRestore();
+          for (const spy of querySpies) spy.mockRestore();
+        }
+      });
+      it("serializes refreshes across endpoints and never replays an ambiguous refresh", async () => {
+        const f = await managedFixture();
+        await db.update(chatSlackManagerGrants).set({ expiresAt: new Date(0) }).where(eq(chatSlackManagerGrants.id, f.grantId));
+        const tokens = await Promise.all([1, 2].map(() => f.grants.token(f.grantId, f.companyId, actor)));
+        expect(tokens.every(result => result.token === "xoxe.rotated-canary")).toBe(true);
+        expect(f.broker.refresh).toHaveBeenCalledTimes(1);
+        await db.update(chatSlackManagerGrants).set({ expiresAt: new Date(0) }).where(eq(chatSlackManagerGrants.id, f.grantId));
+        f.broker.refresh.mockRejectedValue(new Error("provider echoed manager-canary"));
+        await expect(f.grants.token(f.grantId, f.companyId, actor)).rejects.toThrow();
+        await expect(f.grants.token(f.grantId, f.companyId, actor)).rejects.toThrow();
+        expect(f.broker.refresh).toHaveBeenCalledTimes(2);
+      });
+      it("rejects a bot token belonging to a different Slack app before activation", async () => {
+        const f = await managedFixture(); f.state.managedBotAppId = "ADIFFERENT";
+        await f.provision();
+        const saved = await f.service.get(f.endpoint.id);
+        expect(saved.providerAccountId).toBeNull();
+        expect(saved.setup.slackRegistration).toMatchObject({ status: "credentials_saved", errorCode: "slack_install_identity_mismatch" });
+      });
+      it("rejects manager identity changes and both callback-origin and ingress-origin drift", async () => {
+        const f = await managedFixture(); const state = await f.authorize();
+        for (const change of [{ publicBaseUrl: "https://changed.example" }, { webhookPublicBaseUrl: "https://changed.example" }]) {
+          const changed = createService(new FakeChatSdkRuntime(), f.provider, { ...change, slackManaged: { enabled: true, broker: f.broker as unknown as PaperclipCloudConnector } }).service;
+          await expect(changed.slackRegistration.managerGrants.complete(state, "claim", null, actor)).rejects.toThrow();
+        }
+        f.broker.getSlackManagerAppId.mockResolvedValue("ANEWMANAGER");
+        await expect(f.provision()).rejects.toThrow();
+        expect((await f.grants.choices(f.companyId, actor)).workspaces).toEqual([]);
+      });
+      it("preserves provider rate-limit backoff across subsequent attempts", async () => {
+        const f = await managedFixture(); f.state.managedError = "ratelimited";
+        await f.provision();
+        f.state.managedError = null; await f.provision();
+        expect(f.provider.mock.calls.filter(([url]) => String(url).endsWith("apps.managedInstall"))).toHaveLength(1);
+        expect((await f.service.get(f.endpoint.id)).setup.slackRegistration?.errorCode).toBe("slack_setup_rate_limited");
+      });
+      it("routes the broker claim_id callback back to the saved wizard without exposing the handoff", async () => {
+        const f = await managedFixture(); const state = await f.authorize();
+        const response = await request(f.app).get(`/api/chat-slack/managed/oauth/callback?state=${state}&claim_id=sealed-claim-canary`).set("accept", "application/json").expect(303);
+        expect(f.broker.claim.mock.calls.at(-1)![0].claimId).toBe("sealed-claim-canary");
+        expect(response.headers.location).toContain(f.endpoint.id);
+        expect(response.text).not.toContain("sealed-claim-canary");
+        expect(response.headers["cache-control"]).toBe("no-store");
+      });
+      it("does not accept another company's grant or keep authorizations after removal", async () => {
+        const f = await managedFixture(); const other = await seedCompany();
+        await expect(f.grants.token(f.grantId, other.companyId, { ...actor, bypassPermissionCheck: true })).rejects.toThrow();
+        const state = await f.authorize();
+        await f.service.configure(f.endpoint.id, { action: "remove" }, actor.userId);
+        await expect(f.grants.complete(state, "claim", null, actor)).rejects.toThrow();
+        expect((await f.grants.get(f.grantId, f.companyId, actor)).status).toBe("active");
+      });
+      it("revocation invalidates pending authorization and prevents future provisioning", async () => {
+        const f = await managedFixture(); const state = await f.authorize();
+        await f.grants.revoke(f.grantId, f.companyId, actor);
+        await expect(f.grants.complete(state, "claim", null, actor)).rejects.toThrow();
+        await expect(f.provision()).rejects.toThrow();
+        expect((await f.grants.choices(f.companyId, actor)).workspaces).toEqual([]);
+      });
+    });
     function setupEvent(f: Awaited<ReturnType<typeof fixture>>, patch: Record<string, unknown> = {}, url = f.endpoint.setup.webhookUrl!, secret = signingSecret, timestamp?: string) {
       return signedSlackWebhookRequest({ url, contentType: "application/json", signingSecret: secret, ...(timestamp ? { timestamp } : {}),
         body: JSON.stringify({ type: "event_callback", api_app_id: f.appId, team_id: "TAUTO", event_id: "EvSETUP", event: {
@@ -6513,7 +6930,10 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       expect(saved.setup.webhookVerifiedAt).toBeNull();
       expect(saved.providerAccountId).toBe("TAUTO");
       expect(saved.setup.slackAccount).toEqual({ externalUserId: f.installerId, paperclipUserId: actor.userId, status: "linked", welcomeStatus: "sent", dmChannelId: "DWELCOME" });
-      expect(await f.service.listPrincipals(f.endpoint.id)).toEqual([expect.objectContaining({ status: "linked", paperclipUserId: actor.userId })]);
+      expect(await f.service.listPrincipals(f.endpoint.id)).toEqual([expect.objectContaining({ status: "linked", paperclipUserId: actor.userId, paperclipUserImage: null })]);
+      await db.update(authUsers).set({ image: "https://example.test/installer.png" }).where(eq(authUsers.id, actor.userId));
+      expect(await f.service.listPrincipals(f.endpoint.id)).toEqual([expect.objectContaining({ paperclipUserImage: "https://example.test/installer.png" })]);
+      await db.update(authUsers).set({ image: null }).where(eq(authUsers.id, actor.userId));
       const [, welcome] = f.provider.mock.calls.find(([url]) => String(url).endsWith("chat.postMessage"))!;
       expect(new URLSearchParams(String(welcome!.body)).get("channel")).toBe(f.installerId);
       expect(new URLSearchParams(String(welcome!.body)).get("text")).toMatch(/^Hi, I’m .+\. Your Slack account is connected to Paperclip\.$/);
@@ -7697,6 +8117,137 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     expect(wakeup).not.toHaveBeenCalled();
     expect(await readChatConversationsByEndpointId(endpoint.id)).toHaveLength(0);
     expect((await readChatDeliveriesById(delivery.id))[0].state).toBe("filtered");
+  });
+
+  it("snapshots channel workspace defaults on new tasks and preserves them on replies", async () => {
+    const fixture = await seedCompany();
+    const { callbacks, endpoint, service } = await configuredSlackEndpoint(fixture);
+    await service.update(endpoint.id, { executionDefaults: { workspace: { kind: "task_directory" } } }, "owner-user");
+    const thread = makeThread({ channelId: "C-WORKSPACE", id: "slack:C-WORKSPACE:8100.1", name: "workspace" });
+    await deliverMessage({ callbacks, endpointId: endpoint.id, thread: thread.thread,
+      message: makeMessage({ id: "8100.1", text: "@maya make a report", mentioned: true }), trigger: "mention" });
+    const conversations = () => db.select().from(chatConversations).where(eq(chatConversations.endpointId, endpoint.id)).orderBy(asc(chatConversations.createdAt));
+    const [first] = await conversations();
+    const [task] = await db.select().from(issues).where(eq(issues.id, first.issueId));
+    expect(task.projectId).toBeNull();
+    expect(task.workspaceSelection).toEqual({ version: 1, selection: { kind: "task_directory" }, source: "channel" });
+    const [resource] = (await service.listResources(endpoint.id)).filter(row => row.providerResourceId === "C-WORKSPACE");
+    expect(resource).toBeDefined();
+    await service.replaceResources(endpoint.id, [{ id: resource.id, executionDefaults: { workspace: null } }], "owner-user");
+    expect((await service.listResources(endpoint.id)).find(row => row.id === resource.id)?.enabled).toBe(resource.enabled);
+    await service.update(endpoint.id, { executionDefaults: null }, "owner-user");
+    await deliverMessage({ callbacks, endpointId: endpoint.id, thread: thread.thread,
+      message: makeMessage({ id: "8100.2", text: "Continue" }), trigger: "subscribed_message" });
+    const [unchanged] = await db.select().from(issues).where(eq(issues.id, first.issueId));
+    expect(unchanged.workspaceSelection).toEqual(task.workspaceSelection);
+    await service.update(endpoint.id, { executionDefaults: { workspace: { kind: "task_directory" } } }, "owner-user");
+    const next = makeThread({ channelId: "C-WORKSPACE", id: "slack:C-WORKSPACE:8200.1", name: "workspace" });
+    await deliverMessage({ callbacks, endpointId: endpoint.id, thread: next.thread,
+      message: makeMessage({ id: "8200.1", text: "@maya another report", mentioned: true }), trigger: "mention" });
+    const rows = await conversations();
+    expect(rows).toHaveLength(2);
+    const [second] = await db.select().from(issues).where(eq(issues.id, rows[1].issueId));
+    expect(second.workspaceSelection).toBeNull();
+    await expect(service.update(endpoint.id, { executionDefaults: { projectId: randomUUID() } }, "owner-user")).rejects.toMatchObject({ status: 404 });
+    expect((await service.get(endpoint.id)).executionDefaults).toEqual({ workspace: { kind: "task_directory" } });
+  });
+
+  it("checks both linked sender and agent assignment grants for protected organizational defaults", async () => {
+    const fixture = await seedCompany();
+    const { callbacks, endpoint, service, wakeup } = await configuredSlackEndpoint(fixture, { linkedBoardUser: true });
+    const [project] = await db.insert(projects).values({ companyId: fixture.companyId, name: "Protected task project",
+      executionWorkspacePolicy: { authorizationPolicy: { assignmentPolicy: { mode: "protected" } } } }).returning();
+    const defaults = { projectId: project.id, workspace: { kind: "task_directory" as const } };
+    await service.update(endpoint.id, { executionDefaults: defaults }, "owner-user");
+    await db.insert(companyMemberships).values({ companyId: fixture.companyId, principalType: "agent",
+      principalId: fixture.assignedAgentId, status: "active", membershipRole: "member" });
+    const send = async (id: string) => {
+      const thread = makeThread({ channelId: "C-ASSIGNMENT", id: `slack:C-ASSIGNMENT:${id}`, name: "assignment" });
+      await deliverMessage({ callbacks, endpointId: endpoint.id, thread: thread.thread,
+        message: makeMessage({ id, text: "@maya create a report", mentioned: true, userId: "UBOARD" }), trigger: "mention" });
+    };
+    const tasks = () => db.select().from(issues).where(eq(issues.companyId, fixture.companyId));
+    await expect(send("8310.1")).rejects.toMatchObject({ status: 403, message: expect.stringContaining("protected") });
+    expect(await tasks()).toHaveLength(0);
+    expect(wakeup).not.toHaveBeenCalled();
+    const [senderGrant] = await db.insert(principalPermissionGrants).values({ companyId: fixture.companyId,
+      principalType: "user", principalId: "owner-user", permissionKey: "tasks:assign_scope",
+      scope: { projectId: project.id, assigneeAgentId: fixture.assignedAgentId } }).returning();
+    await expect(send("8310.2")).rejects.toMatchObject({ status: 403, message: expect.stringContaining("protected") });
+    expect(await tasks()).toHaveLength(0);
+    expect(wakeup).not.toHaveBeenCalled();
+    await db.insert(principalPermissionGrants).values({ companyId: fixture.companyId,
+      principalType: "agent", principalId: fixture.assignedAgentId, permissionKey: "tasks:assign_scope",
+      scope: { projectId: project.id, assigneeAgentId: fixture.assignedAgentId } });
+    await send("8310.3");
+    expect(await tasks()).toEqual([expect.objectContaining({ projectId: project.id,
+      assigneeAgentId: fixture.assignedAgentId,
+      workspaceSelection: { version: 1, selection: { kind: "task_directory" }, source: "channel" } })]);
+    expect(wakeup).toHaveBeenCalledTimes(1);
+    await db.delete(principalPermissionGrants).where(eq(principalPermissionGrants.id, senderGrant.id));
+    await expect(send("8310.4")).rejects.toMatchObject({ status: 403, message: expect.stringContaining("protected") });
+    expect(await tasks()).toHaveLength(1);
+    expect(wakeup).toHaveBeenCalledTimes(1);
+    expect(await db.select().from(chatConversations).where(eq(chatConversations.endpointId, endpoint.id))).toHaveLength(1);
+  });
+
+  it("checks protected organizational defaults against the assignee locked at creation", async () => {
+    const fixture = await seedCompany();
+    let endpointId = "";
+    const { callbacks, endpoint, service, wakeup } = await configuredSlackEndpoint(fixture, {
+      linkedBoardUser: true,
+      reachAuthorizationBarrier: async () => {
+        await db.update(chatEndpoints).set({ assignedAgentId: fixture.replacementAgentId }).where(eq(chatEndpoints.id, endpointId));
+      },
+    });
+    endpointId = endpoint.id;
+    const [project] = await db.insert(projects).values({ companyId: fixture.companyId, name: "Protected reassignment",
+      executionWorkspacePolicy: { authorizationPolicy: { assignmentPolicy: { mode: "protected" } } } }).returning();
+    await service.update(endpoint.id, { executionDefaults: { projectId: project.id, workspace: { kind: "task_directory" } } }, "owner-user");
+    await db.insert(companyMemberships).values({ companyId: fixture.companyId, principalType: "agent",
+      principalId: fixture.assignedAgentId, status: "active", membershipRole: "member" });
+    await db.insert(principalPermissionGrants).values([
+      { companyId: fixture.companyId, principalType: "user", principalId: "owner-user", permissionKey: "tasks:assign_scope",
+        scope: { projectId: project.id, assigneeAgentId: fixture.assignedAgentId } },
+      { companyId: fixture.companyId, principalType: "agent", principalId: fixture.assignedAgentId, permissionKey: "tasks:assign_scope",
+        scope: { projectId: project.id, assigneeAgentId: fixture.assignedAgentId } },
+    ]);
+    const thread = makeThread({ channelId: "C-REASSIGNED", id: "slack:C-REASSIGNED:8320.1", name: "reassigned" });
+    await expect(deliverMessage({ callbacks, endpointId: endpoint.id, thread: thread.thread,
+      message: makeMessage({ id: "8320.1", text: "@maya create a report", mentioned: true, userId: "UBOARD" }), trigger: "mention" }))
+      .rejects.toMatchObject({ status: 403, message: expect.stringContaining("protected") });
+    expect(await db.select().from(issues).where(eq(issues.companyId, fixture.companyId))).toHaveLength(0);
+    expect(wakeup).not.toHaveBeenCalled();
+  });
+
+  it("authorizes protected channel workspace defaults for the endpoint's assigned agent", async () => {
+    const fixture = await seedCompany();
+    const { callbacks, endpoint, service } = await configuredSlackEndpoint(fixture, { linkedBoardUser: true });
+    const [project] = await db.insert(projects).values({ companyId: fixture.companyId, name: "Protected chat source",
+      executionWorkspacePolicy: { authorizationPolicy: { assignmentPolicy: { mode: "protected" } } } }).returning();
+    const [source] = await db.insert(projectWorkspaces).values({ companyId: fixture.companyId, projectId: project.id,
+      name: "Source", cwd: `/tmp/chat-source-${fixture.companyId}` }).returning();
+    const defaults = { workspace: { kind: "configured_source" as const, projectWorkspaceId: source.id, mode: "shared" as const } };
+    await expect(service.update(endpoint.id, { executionDefaults: defaults }, "owner-user")).rejects.toMatchObject({ status: 403 });
+    await db.insert(companyMemberships).values({ companyId: fixture.companyId, principalType: "agent",
+      principalId: fixture.assignedAgentId, status: "active", membershipRole: "member" });
+    await db.insert(principalPermissionGrants).values([
+      { companyId: fixture.companyId, principalType: "user", principalId: "owner-user", permissionKey: "tasks:assign_scope",
+        scope: { projectId: project.id, assigneeAgentId: fixture.assignedAgentId } },
+      { companyId: fixture.companyId, principalType: "agent", principalId: fixture.assignedAgentId, permissionKey: "tasks:assign_scope",
+        scope: { projectId: project.id, assigneeAgentId: fixture.assignedAgentId } },
+    ]);
+    await service.update(endpoint.id, { executionDefaults: defaults }, "owner-user");
+    const thread = makeThread({ channelId: "C-PROTECTED", id: "slack:C-PROTECTED:8300.1", name: "protected" });
+    await deliverMessage({ callbacks, endpointId: endpoint.id, thread: thread.thread,
+      message: makeMessage({ id: "8300.1", text: "@maya update these files", mentioned: true, userId: "UBOARD" }), trigger: "mention" });
+    const [conversation] = await db.select().from(chatConversations).where(eq(chatConversations.endpointId, endpoint.id));
+    expect(conversation).toBeDefined();
+    const [task] = await db.select().from(issues).where(eq(issues.id, conversation.issueId));
+    expect(task).toMatchObject({ assigneeAgentId: fixture.assignedAgentId, projectId: null, projectWorkspaceId: source.id });
+    const [resource] = (await service.listResources(endpoint.id)).filter(row => row.providerResourceId === "C-PROTECTED");
+    await service.replaceResources(endpoint.id, [{ id: resource.id, executionDefaults: defaults }], "owner-user");
+    expect((await service.listResources(endpoint.id)).find(row => row.id === resource.id)?.executionDefaults).toEqual(defaults);
   });
 
   it("captures initial Slack communication guidance once per task, ignoring forged message configuration", async () => {
@@ -9567,6 +10118,60 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     expect(connection!.refs).toEqual([
       expect.objectContaining({ configPath: "credentials.webhookSecret" }),
     ]);
+  });
+
+  it.each(["slack", "discord", "github"] as const)("preserves the public inventory error response for %s", async (provider) => {
+    const fixture = await seedCompany();
+    let failInventory = false;
+    let service: ChatChannelService;
+    let endpoint: Awaited<ReturnType<ChatChannelService["create"]>>;
+    if (provider === "slack") {
+      const successfulFetch = fakeSlackFetch();
+      const context = await configuredSlackEndpoint(fixture, {
+        fetch: (async (input, init) => {
+          if (failInventory && String(input).includes("/conversations.list"))
+            throw new Error("inventory fixture outage");
+          return successfulFetch(input, init);
+        }) as typeof fetch,
+      });
+      ({ service, endpoint } = context);
+    } else if (provider === "discord") {
+      const applicationId = uniqueDiscordApplicationId();
+      const successfulFetch = fakeDiscordFetch(applicationId);
+      const context = createService(new FakeChatSdkRuntime(), (async (input) => {
+        if (failInventory && new URL(String(input)).pathname.endsWith("/channels"))
+          throw new Error("inventory fixture outage");
+        return successfulFetch(input);
+      }) as typeof fetch);
+      service = context.service;
+      endpoint = await service.create(fixture.companyId, {
+        provider, assignedAgentId: fixture.assignedAgentId,
+      }, "owner-user");
+      await service.configure(endpoint.id, {
+        action: "configure",
+        credentials: { applicationId, botToken: "discord-secret", guildId: "1457808928258658549" },
+      }, "owner-user");
+    } else {
+      const context = await configuredGitHubEndpoint(fixture);
+      ({ service, endpoint } = context);
+      context.setSupplementalProviderFetch(async (input) => {
+        if (failInventory && String(input).includes("/app/installations?"))
+          throw new Error("inventory fixture outage");
+        return undefined;
+      });
+    }
+    const [before] = await readToolConnectionsById(endpoint.connectionId);
+    failInventory = true;
+    const response = await request(routesApp(db, fixture.companyId, service))
+      .post(`/api/chat-endpoints/${endpoint.id}/setup`)
+      .send({ action: "reconnect" });
+    expect(response.status).toBe(422);
+    expect(response.body).toMatchObject({
+      error: expect.stringContaining("inventory fixture outage"),
+      details: { code: "chat_provider_inventory_failed" },
+    });
+    const [after] = await readToolConnectionsById(endpoint.connectionId);
+    expect(after.credentialSecretRefs).toEqual(before.credentialSecretRefs);
   });
 
   it("rejects under-scoped Slack and GitHub apps before saving provider credentials", async () => {
@@ -32479,6 +33084,26 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
           await set("delivery_unknown");
           expect(await f.service.nextChatActionAt(kind)).toBeNull();
           expect(await due()).toBe(false);
+        } else if (kind === "failed_run_retry") {
+          expect(await due()).toBe(false);
+          await set("issued");
+          expect(await due()).toBe(true);
+          await set("issued", { retryAt: later.toISOString() });
+          expect(await f.service.nextChatActionAt(kind)).toBe(later.getTime());
+          expect(await due()).toBe(false);
+          await set("processing");
+          expect(await f.service.nextChatActionAt(kind)).toBe(at.getTime() + 60_000);
+          expect(await due()).toBe(false);
+          // Both the claim lease and retry time must expire before replay.
+          await set("processing", { retryAt: later.toISOString() });
+          expect(await f.service.nextChatActionAt(kind)).toBe(later.getTime());
+          await set("processing", { retryAt: at.toISOString() });
+          expect(await f.service.nextChatActionAt(kind)).toBe(at.getTime() + 60_000);
+          for (const status of ["failed", "cancelled", "processed"]) {
+            await set(status, { retryable: true, retryAt: at.toISOString() });
+            expect(await f.service.nextChatActionAt(kind)).toBeNull();
+            expect(await due()).toBe(false);
+          }
         } else if (kind === "slack_session_sync") {
           expect(await due()).toBe(true);
           await set("received", { retryAt: later.toISOString() });
@@ -59232,6 +59857,81 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     },
   );
 
+  it.each(["commit", "retry", "startup", "stale_claim", "rollback"] as const)(
+    "drains failed chat retries from durable work and becomes idle: %s",
+    async (mode) => {
+      const context = await failedChatRetryFixture("telegram");
+      const onError = vi.fn();
+      const coordinator = createDeliveryWorkCoordinator({ owner: db, canRun: () => true, onError });
+      const input = { companyId: context.fixture.companyId, issueId: context.issue.id,
+        agentId: context.fixture.assignedAgentId, failedRunId: context.runId, initiatedByUserId: "owner-user" };
+      const stage = () => db.transaction(tx => context.service.prepareFailedChatRunRetry(tx, input));
+      context.wakeup.mockClear();
+      try {
+        let actionId: string;
+        if (mode === "startup" || mode === "stale_claim") {
+          ({ actionId } = await stage());
+          if (mode === "stale_claim") await db.update(chatActions).set({ status: "processing",
+            updatedAt: new Date(Date.now() - 120_000) }).where(eq(chatActions.id, actionId));
+          await registerChatActionWork(coordinator, context.service, () => true).ready;
+        } else {
+          await registerChatActionWork(coordinator, context.service, () => true).ready;
+          if (mode === "rollback") {
+            await expect(db.transaction(async tx => {
+              await context.service.prepareFailedChatRunRetry(tx, input);
+              throw new Error("rollback retry intent");
+            })).rejects.toThrow("rollback retry intent");
+            await vi.waitFor(() => {
+              expect(coordinator.nextWakeAt()).toBeNull();
+              expect(idleWorkSnapshot().active).toBe(0);
+            }, { timeout: 10_000 });
+            expect(context.wakeup).not.toHaveBeenCalled();
+          }
+          if (mode === "retry") {
+            let failedAt = 0;
+            context.wakeup.mockImplementationOnce(async () => {
+              failedAt = Date.now();
+              throw new Error("temporary admission outage");
+            }).mockImplementationOnce(async () => {
+              expect(Date.now() - failedAt).toBeGreaterThanOrEqual(250);
+              return { accepted: true };
+            });
+          }
+          ({ actionId } = await db.transaction(async tx => {
+            const staged = await tx.transaction(nested => context.service.prepareFailedChatRunRetry(nested, input));
+            // A nested savepoint must not wake the worker before the outer commit.
+            await new Promise(resolve => setTimeout(resolve, 25));
+            expect(context.wakeup).not.toHaveBeenCalled();
+            return staged;
+          }));
+        }
+        await vi.waitFor(async () => {
+          const [action] = await db.select().from(chatActions).where(eq(chatActions.id, actionId));
+          expect(action?.status).toBe("processed");
+          expect(action?.result.attemptCount).toBe(mode === "retry" ? 2 : 1);
+          expect(coordinator.nextWakeAt()).toBeNull();
+        }, { timeout: 10_000 });
+        expect(context.wakeup).toHaveBeenCalledTimes(mode === "retry" ? 2 : 1);
+        const receipts = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, actionId));
+        expect(receipts).toHaveLength(1);
+        expect(receipts[0]?.payload).toMatchObject({ retryOfRunId: context.runId,
+          wakeCommentIds: [context.action.payload.commentId] });
+        // A running worker has no scheduled deadline. Wait for its final scan
+        // and any commit-driven follow-up before measuring the quiet period.
+        await vi.waitFor(() => {
+          expect(coordinator.nextWakeAt()).toBeNull();
+          expect(idleWorkSnapshot().active).toBe(0);
+        }, { timeout: 10_000 });
+        const scans = vi.spyOn(db, "select");
+        try {
+          await new Promise(resolve => setTimeout(resolve, 1200));
+          expect(scans).not.toHaveBeenCalled();
+        } finally { scans.mockRestore(); }
+        expect(onError).not.toHaveBeenCalled();
+      } finally { await coordinator.stop(); await context.service.shutdown(); }
+    },
+  );
+
   it.each(["slack", "telegram"] as const)(
     "retries the exact failed %s chat input with a new idempotent admission",
     async (provider) => {
@@ -64510,7 +65210,10 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     }
   });
 
-  it("migrates Telegram basic-group reach and topic tasks to the replacement supergroup", async () => {
+  it.each([
+    ...["unset", "inherit", "clear", "configured"].flatMap((defaultsMode) =>
+      [false, true].map((existingDestination) => ({ defaultsMode, existingDestination }))),
+  ])("migrates Telegram basic-group reach, topic tasks and $defaultsMode defaults (existing destination: $existingDestination)", async ({ defaultsMode, existingDestination }) => {
     const fixture = await seedCompany();
     const { callbacks, endpoint, service, wakeup } =
       await configuredTelegramEndpoint(fixture);
@@ -64518,6 +65221,17 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       .update(chatEndpoints)
       .set({ status: "active" })
       .where(eq(chatEndpoints.id, endpoint.id));
+    const [defaultProject, selectedProject] = await db.insert(projects).values([
+      { companyId: fixture.companyId, name: "Endpoint default project" },
+      { companyId: fixture.companyId, name: "Migrated resource project" },
+    ]).returning();
+    await service.update(endpoint.id, { executionDefaults: {
+      projectId: defaultProject.id, workspace: { kind: "task_directory" },
+    } }, "owner-user");
+    const executionDefaults = defaultsMode === "unset" ? null
+      : defaultsMode === "inherit" ? {}
+      : defaultsMode === "clear" ? { projectId: null, workspace: null }
+      : { projectId: selectedProject.id, workspace: { kind: "task_directory" as const } };
     const previousChatId = "-5546433913";
     const migratedChatId = "-1004415501660";
     const topicId = 77;
@@ -64531,8 +65245,14 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
         label: "Telegram migration group",
         availability: "available",
         enabled: true,
+        executionDefaults,
       })
       .returning();
+    if (existingDestination) await db.insert(chatEndpointResources).values({
+      companyId: fixture.companyId, endpointId: endpoint.id, type: "chat",
+      providerResourceId: migratedChatId, label: "Existing destination", availability: "available",
+      executionDefaults: { projectId: selectedProject.id, workspace: null },
+    });
     const previousTopic = makeThread({
       channelId: `telegram:${previousChatId}`,
       id: `telegram:${previousChatId}:${topicId}`,
@@ -64591,6 +65311,7 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
         }),
         expect.objectContaining({
           providerResourceId: migratedChatId,
+          executionDefaults,
           label: "Telegram migration group",
           availability: "available",
           enabled: true,
@@ -64645,6 +65366,20 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       { body: "Continue by replying after the group migration" },
     ]);
     expect(wakeup).toHaveBeenCalledTimes(2);
+
+    const newTopic = makeThread({ channelId: `telegram:${migratedChatId}`,
+      id: `telegram:${migratedChatId}:${topicId + 1}`, name: "New migrated topic" });
+    await deliverMessage({ callbacks, endpointId: endpoint.id, provider: "telegram", thread: newTopic.thread,
+      message: makeMessage({ id: `${migratedChatId}:43`, raw: { message_id: 43, message_thread_id: topicId + 1 },
+        text: "Start a new topic after migration", mentioned: true, userId: "telegram-migration-user" }), trigger: "mention" });
+    const newConversation = (await service.listConversations(endpoint.id)).find(row => row.id !== beforeMigration.id);
+    expect(newConversation).toBeDefined();
+    const [newTask] = await readIssuesById(newConversation!.issueId);
+    expect(newTask.projectId).toBe(defaultsMode === "clear" ? null
+      : defaultsMode === "configured" ? selectedProject.id : defaultProject.id);
+    expect(newTask.workspaceSelection).toEqual(defaultsMode === "clear" ? null
+      : { version: 1, selection: { kind: "task_directory" }, source: "channel" });
+    expect(wakeup).toHaveBeenCalledTimes(3);
   });
 
   it("enforces Telegram group reach and privacy-mode addressing before retaining message content", async () => {

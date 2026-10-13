@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { agents, companies, createDb, environments, heartbeatRuns, issues, projects, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, type Db } from "@paperclipai/db";
+import { agents, companies, createDb, environments, heartbeatRuns, issues, projects, projectWorkspaces, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, type Db } from "@paperclipai/db";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../../__tests__/helpers/embedded-postgres.js";
@@ -46,13 +46,13 @@ describe.skipIf(!support.supported)("heartbeat environment selection boundary", 
     const [run] = await db.insert(heartbeatRuns).values({ companyId: company.id, agentId: agent.id, issueId: issue.id, scopeKind: "issue", status: "running", runtimeMode: "legacy" }).returning();
     const input: HeartbeatEnvironmentSelectionInput = {
       run, agent,
-      task: { issueRef: issue, issueContext: issue, issueId: issue.id, executionProjectId: project.id, projectContext: { hasWorkspace: false }, context: { issueId: issue.id } },
+      task: { issueRef: issue, issueContext: issue, issueId: issue.id, executionProjectId: project.id, workspaceProjectContext: { hasWorkspace: false }, boundSourceWorkspace: null, hasSelectedWorkspaceSource: false, taskWorkspaceIntent: null, responsibleUserId: null, context: { issueId: issue.id } },
       policy: {
         trustPreset: { kind: "standard", preset: "standard", boundary: null, sourcePresets: {} },
         requestedExecutionWorkspaceMode: "shared_workspace", isolatedWorkspacesEnabled: true,
         projectExecutionWorkspacePolicy: null, issueExecutionWorkspaceSettings: null,
       },
-      config: { config: {}, issueAssigneeOverrides: null },
+      config: { config: {}, sourceWorkspaceConfig: {}, issueAssigneeOverrides: null },
       services: { environmentsSvc: environmentService(db), executionWorkspacesSvc: executionWorkspaceService(db), instanceSettings: instanceSettingsService(db), findSharedWorkspaceHolder: vi.fn(async () => null) },
     };
     const workspace = async () => {
@@ -126,17 +126,33 @@ describe.skipIf(!support.supported)("heartbeat environment selection boundary", 
     await db.update(issues).set({ originKind: "chat_channel", projectId: null }).where(eq(issues.id, issue.id));
     input.agent.adapterType = "paperclip_runner";
     input.task.executionProjectId = null;
-    input.task.projectContext = null;
+    input.task.workspaceProjectContext = null;
     const result = await selectHeartbeatEnvironment(db, input);
     expect(result.nativeChatWorkspaceScope).toMatchObject({ companyId: input.agent.companyId, agentId: input.agent.id, issueId: issue.id, projectId: null });
     expect(result.nativeChatExpectedCwd).toBe(result.nativeChatWorkspaceScope?.taskRoot);
-    expect(result.nativeChatExpectedCwd).toContain(`chat-workspaces/${input.agent.companyId}/${input.agent.id}/${issue.id}`);
+    expect(result.nativeChatExpectedCwd).toContain(`isolated-workspaces/${input.agent.companyId}/${issue.id}`);
   });
 
-  it("rejects a project chat without a task-owned isolated workspace", async () => {
-    const { input, issue } = await fixture();
-    await db.update(issues).set({ originKind: "chat_channel" }).where(eq(issues.id, issue.id));
+  it.each(["git_worktree", "project_primary"] as const)("only prepares fresh native chat isolation with a %s source strategy", async (strategy) => {
+    const { input, issue, project } = await fixture();
+    const [source] = await db.insert(projectWorkspaces).values({ companyId: input.agent.companyId, projectId: project.id,
+      name: "Chat source", cwd: home, sourceType: "local_path", isPrimary: true }).returning();
+    const intent = { version: 1 as const, source: "explicit" as const, selection: { kind: "configured_source" as const, projectWorkspaceId: source.id, mode: "managed_isolated" as const } };
+    await db.update(issues).set({ originKind: "chat_channel", projectWorkspaceId: source.id, workspaceSelection: intent }).where(eq(issues.id, issue.id));
+    input.task.issueRef!.projectWorkspaceId = source.id;
+    input.task.workspaceProjectContext = { hasWorkspace: true };
+    input.task.hasSelectedWorkspaceSource = true;
+    input.task.taskWorkspaceIntent = intent;
     input.agent.adapterType = "paperclip_runner";
-    await expect(selectHeartbeatEnvironment(db, input)).rejects.toThrow("External chat requires a task-owned isolated workspace");
+    input.policy.requestedExecutionWorkspaceMode = "isolated_workspace";
+    input.config.sourceWorkspaceConfig = { workspaceStrategy: { type: strategy } };
+    if (strategy === "project_primary") {
+      await expect(selectHeartbeatEnvironment(db, input)).rejects.toThrow("External chat requires a task-owned isolated workspace");
+    } else {
+      const result = await selectHeartbeatEnvironment(db, input);
+      expect(result).toMatchObject({ materializeNativeChatWorktree: true, nativeChatExpectedCwd: null, existingExecutionWorkspace: null });
+      expect(result.nativeChatWorkspaceScope?.projectId).toBe(project.id);
+      expect((await db.select().from(issues).where(eq(issues.id, issue.id)))[0].executionWorkspaceId).toBeNull();
+    }
   });
 });

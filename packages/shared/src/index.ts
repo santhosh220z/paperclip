@@ -2873,4 +2873,9 @@ export { AGENT_LIFECYCLE_STATES, type AgentLifecycleState, type AgentLifecycleOp
 
 export type { AgentLifecycleRequest, AgentLifecycleResult } from "./types/agent-lifecycle.js";
 
+export * from "./types/task-workspace.js";
+export * from "./validators/task-workspace.js";
+
+export { prepareWorkspaceRepositorySchema, type PrepareWorkspaceRepository } from "./validators/workspace-repository.js";
+
 export * from "./fast-response.js";

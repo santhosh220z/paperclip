@@ -1,5 +1,6 @@
 import { issueRecoveryActionService } from "../issue-recovery-actions.js";
 import { nativeSha256 } from "./canonical.js";
+import { NATIVE_WORKSPACE_OWNER_UNVERIFIED } from "./native-workspace-finalization-recovery-state.js";
 import { randomUUID } from "node:crypto";
 import os from "node:os";
 import { and, eq, sql } from "drizzle-orm";
@@ -74,11 +75,18 @@ export async function withNativeWorkspaceFinalizationOwnership<T>(
       const prior = readOwner(rawPrior);
       if (rawPrior != null) {
         const requireStopVerification = async () => {
-          if (run.issueId) await issueRecoveryActionService(input.db).upsertSourceScoped({
+          const fingerprint = nativeSha256({ runId: input.runId, owner: rawPrior });
+          const recovery = issueRecoveryActionService(input.db);
+          const existing = run.issueId ? await recovery.getActiveForIssue(input.companyId, run.issueId) : null;
+          // Rechecking the same physical owner is not a new recovery attempt.
+          if (existing?.cause === NATIVE_WORKSPACE_OWNER_UNVERIFIED && existing.fingerprint === fingerprint) {
+            return { acquired: false } as const;
+          }
+          if (run.issueId) await recovery.upsertSourceScoped({
             companyId: input.companyId, sourceIssueId: run.issueId,
             kind: "active_run_watchdog", ownerType: "board", returnOwnerAgentId: run.agentId,
-            cause: "native_workspace_finalization_owner_unverified",
-            fingerprint: nativeSha256({ runId: input.runId, owner: rawPrior }),
+            cause: NATIVE_WORKSPACE_OWNER_UNVERIFIED,
+            fingerprint,
             evidence: { runId: input.runId, owner: rawPrior },
             nextAction: "Verify the previous controller and its workspace-copyback processes have stopped, then release only this exact workspace owner receipt using doc/native-workspace-finalization-recovery.md. Resume workspace finalization without another provider turn.",
             wakePolicy: null, maxAttempts: 1, supersedeOnIdentityChange: true,

@@ -1,3 +1,4 @@
+import type { FileUpload } from "chat";
 import { createHash } from "node:crypto";
 
 
@@ -28,3 +29,11 @@ export function discordLifecycleFilesDigest(raw: unknown): string {
     : [];
   return createHash("sha256").update(JSON.stringify(projection)).digest("hex");
 }
+
+export function discordMarkdownAttachment(text: string): FileUpload {
+    return {
+      data: Buffer.from(text, "utf8"),
+      filename: "paperclip-response.md",
+      mimeType: "text/markdown; charset=utf-8",
+    };
+  }

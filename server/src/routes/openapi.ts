@@ -1,5 +1,5 @@
 import { updateFastResponseSchema } from "@paperclipai/shared";
-import { slackRegistrationSchema, slackSetupActionSchema, slackInstallAuthorizationSchema, slackRegistrationStateSchema, slackAppConfigurationSchema, slackAvatarStateSchema, slackAccountStateSchema } from "@paperclipai/shared";
+import { slackTestMessageSchema, slackTestMessageResultSchema, slackManagerAuthorizationSchema, slackSetupOptionsSchema, slackManagedProvisionSchema, slackManagedResultSchema, slackRegistrationSchema, slackSetupActionSchema, slackInstallAuthorizationSchema, slackRegistrationStateSchema, slackAppConfigurationSchema, slackAvatarStateSchema, slackAccountStateSchema } from "@paperclipai/shared";
 import { experimentalApiMetadata } from "./experimental-api-metadata.js";
 import {
   experimentalApiPaths,
@@ -76,6 +76,8 @@ import {
   upsertIssueFeedbackVoteSchema,
   upsertIssueWatchdogSchema,
   runnerGoalActionRequestSchema,
+  selectTaskWorkspaceSchema,
+  prepareWorkspaceRepositorySchema,
   // Project
   createProjectSchema,
   updateProjectSchema,
@@ -803,8 +805,9 @@ const chatAdapterCapabilitiesResponseSchema = z
 const chatEndpointSetupResponseSchema = z
   .object({
     step: z.enum(["choose_agent", "provider_setup", "test", "complete"]),
-    slackSetupMethod: z.enum(["automatic", "manual", "existing"]).optional(),
+    slackSetupMethod: z.enum(["managed", "automatic", "manual", "existing"]).optional(),
     slackRegistration: slackRegistrationStateSchema.optional(),
+    slackManagerError: z.string().optional(),
     slackAvatar: slackAvatarStateSchema.optional(),
     slackAccount: slackAccountStateSchema.optional(),
     slackOAuthCallbackUri: z.string().nullable().optional(),
@@ -907,6 +910,7 @@ const chatPrincipalLinkResponseSchema = z
     externalDetail: z.string(),
     paperclipUserId: z.string().nullable(),
     paperclipUserLabel: z.string().nullable(),
+    paperclipUserImage: z.string().nullable(),
     status: chatIdentityLinkStatusSchema,
   })
   .strict();
@@ -2561,6 +2565,41 @@ registry.registerPath({
     502: { description: "Provider returned an invalid response; inspect provider health" },
     503: { description: "Provider temporarily unavailable; retry later" },
   },
+});
+
+registry.registerPath({
+  method: "get", path: "/api/companies/{companyId}/chat-slack/setup-options", tags: ["chat-channels"],
+  summary: "Discover Slack setup methods and the current user's authorized workspaces",
+  description: "Managed setup is advertised only for approved Cloud deployments with the broker profile enabled. Self-hosted discovery makes no hosted-service requests. Grants are personal and company scoped.",
+  request: { params: z.object({ companyId: z.string().uuid() }) }, responses: { 200: r.ok(slackSetupOptionsSchema), 401: r.unauthorized, 403: r.forbidden },
+});
+for (const action of ["authorize", "provision"] as const) registry.registerPath({
+  method: "post", path: `/api/chat-endpoints/{endpointId}/slack/managed/${action}`, tags: ["chat-channels"],
+  summary: action === "authorize" ? "Authorize a personal Slack manager workspace grant" : "Provision the saved managed Slack app",
+  description: "Requires the selected managed method, company membership, connection-management permission and Cloud availability. Authorization state is actor/session bound and single use. Provisioning accepts a personal grant ID and idempotent request ID; no provider credentials or arbitrary manifests are accepted. Explicit reconnect uses reconnect=true with a fresh request ID to reinstall the saved app. Repeating that reconnect request returns its saved result without reinstalling a healthy connection.",
+  request: { params: z.object({ endpointId: z.string().uuid() }), body: jsonBody(action === "authorize" ? slackSetupActionSchema : slackManagedProvisionSchema) },
+  responses: { 200: r.ok(action === "authorize" ? slackManagerAuthorizationSchema : slackManagedResultSchema), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict, 422: r.unprocessable },
+});
+registry.registerPath({
+  method: "delete", path: "/api/companies/{companyId}/chat-slack/manager-grants/{grantId}", tags: ["chat-channels"],
+  summary: "Revoke the current user's workspace grant for future managed provisioning",
+  description: "Removes local manager credentials and invalidates pending manager authorization. Installed bots remain connected; this does not uninstall Slack apps.",
+  request: { params: z.object({ companyId: z.string().uuid(), grantId: z.string().uuid() }) }, responses: { 204: { description: "Personal manager grant revoked" }, 401: r.unauthorized, 403: r.forbidden },
+});
+registry.registerPath({
+  method: "get", path: "/api/chat-slack/managed/oauth/callback", tags: ["chat-channels"],
+  summary: "Redeem a sealed manager authorization and return to Slack setup",
+  description: "Authenticated, same-origin continuation with company, actor, session, endpoint revision and configured-origin checks. The broker handoff is single use; credentials are never returned to the browser. Explicit local development qualification accepts a Slack code instead of a broker claim; production ignores code.",
+  request: { query: z.object({ state: z.string(), claim_id: z.string().optional(), code: z.string().optional(), error: z.string().optional() }) },
+  responses: { 200: { description: "Same-origin continuation page" }, 303: { description: "Return to saved setup" }, 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 409: r.conflict },
+});
+
+registry.registerPath({
+  method: "post", path: "/api/chat-endpoints/{endpointId}/slack/test-message", tags: ["chat-channels"],
+  summary: "Connect the current user's Slack identity and send a test DM",
+  description: "Requires a board connection manager and active company membership. Reuses only the actor's verified identity in the same workspace; otherwise returns paginated account choices and sends a private connection challenge. The account holder must confirm it while signed in before linking or test delivery. Revoked and conflicting links cannot be overwritten. The request ID prevents duplicate or ambiguous sends from being replayed.",
+  request: { params: z.object({ endpointId: z.string().uuid() }), body: jsonBody(slackTestMessageSchema) },
+  responses: { 200: r.ok(slackTestMessageResultSchema), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict, 422: r.unprocessable, 429: { description: "Wait before sending another test message" } },
 });
 
 for (const action of ["registration", "install", "resume"] as const) {
@@ -4284,6 +4323,35 @@ registry.registerPath({
     409: r.conflict,
     422: r.unprocessable,
   },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/issues/{id}/workspace",
+  tags: ["issues"],
+  summary: "Inspect the task workspace and repository preparation state",
+  request: { params: z.object({ id: z.string().uuid() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "put",
+  path: "/api/issues/{id}/workspace",
+  tags: ["issues"],
+  summary: "Select a task workspace for the next normal admission",
+  description: "Records workspace intent without restarting active work or changing the task's organizational project. Agents may select only for their bound task.",
+  request: { params: z.object({ id: z.string().uuid() }), body: jsonBody(selectTaskWorkspaceSchema) },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/issues/{id}/workspace/repositories",
+  tags: ["issues"],
+  summary: "Request repository preparation in the task workspace",
+  description: "Queues an authorized repository for the next normal admission. The response does not claim the repository is available in an already-running provider session.",
+  request: { params: z.object({ id: z.string().uuid() }), body: jsonBody(prepareWorkspaceRepositorySchema) },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict },
 });
 
 registry.registerPath({

@@ -165,6 +165,16 @@ function isHermesConnectionFailure(run: HeartbeatRun, options: RunFailureReportO
 }
 
 /**
+ * The adapter proved the user's provider account is out of quota, and recovery
+ * waits for its reset. Both fields come from the adapter's own classifier.
+ */
+function isProviderQuotaFailure(run: HeartbeatRun, options: RunFailureReportOptions): boolean {
+  return run.status === "failed" && run.errorCode === "provider_quota" &&
+    asRecord(run.resultJson)?.errorFamily === "provider_quota" &&
+    options.phase !== "setup" && run.signal == null;
+}
+
+/**
  * Report a terminal run failure to Sentry. Returns at once for any status
  * other than failures and unexpected started cancellations. Never throws — a Sentry failure or a
  * database read failure must not change the caller's control flow.
@@ -182,6 +192,7 @@ export function reportRunFailure(db: Db, run: HeartbeatRun, options: RunFailureR
   if (isAiConnectionSelectionBlocker(run, options)) return Promise.resolve();
   if (isLocalPathWorkspaceConfigurationBlocker(run, options)) return Promise.resolve();
   if (isGitConnectionFailure(run, options)) return Promise.resolve();
+  if (isProviderQuotaFailure(run, options)) return Promise.resolve();
   const runStatus = run.status;
   const report = captureTerminalRunFailure(db, run, runStatus, options);
   pendingRunFailureReports.add(report);

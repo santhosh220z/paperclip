@@ -701,6 +701,18 @@ this non-secret binding for this namespace; Slack bot installation does not use
 PKCE. Removal and manual recovery invalidate outstanding attempts under the same
 credential-mutation lease used by configuration.
 
+### Slack manager workspace grants
+
+`chat_slack_manager_grants` stores a personal workspace authorization, scoped by
+company, Paperclip user, Slack user, workspace and manager app. Access/refresh
+credentials are references to user-scoped vault entries, never plaintext columns.
+Revision fencing protects reauthorization from concurrent revocation. Per-method
+rate-limit deadlines retain Slack's Retry-After across setup retries.
+
+`chat_slack_registrations.manager_grant_id` is optional, with a composite company
+foreign key. Existing registrations remain customer owned with a null reference.
+Deleting one endpoint removes its registration credentials and attempts, but does
+not revoke grants used by other bots. See [Slack setup](connections/slack-setup.md).
 
 ## Transaction-aware delivery work signals
 
@@ -743,3 +755,48 @@ Use the same root client for in-process writers. New queue insertion paths must
 register before writing, or they can remain unseen until the next startup or
 another notification. Tests should verify both the producer and its outer
 transaction boundary.
+
+
+### Task workspace records (2026-10-09)
+
+Migration [0336_big_crystal.sql](../packages/db/src/migrations/0336_big_crystal.sql) makes `execution_workspaces.project_id` nullable and changes its project reference to `ON DELETE RESTRICT`: source-project policy cannot disappear while a workspace still depends on it. `issues.execution_workspace_id` remains the sole active task binding. Versioned selection/pending-selection JSON and a binding revision record intent and protect transitions; they are not additional active bindings. Accepting a new pending choice advances the revision without changing the active folder. Its receipt retains the original request revision, so current-choice retries are idempotent and superseded retries fail the revision check.
+
+`execution_workspace_repositories` is company-scoped inventory beneath an execution workspace. It records repository identity, contained relative path, requested ref, pinned commit, preparation state and idempotency receipts. Credentials are resolved at use and are never stored in this inventory. Connection/destination `execution_defaults` JSON contains optional typed project/workspace choices, never arbitrary host paths or commands.
+
+Migration [0337_exotic_proemial_gods.sql](../packages/db/src/migrations/0337_exotic_proemial_gods.sql) adds internal `execution_workspace_repository_roots` records. A company and hash of its canonical physical path uniquely identify a sticky `anonymous_only` or `managed` acquisition reservation. Short transactions serialize reservations with repository requests and credential promotion, preventing private publication after low-trust admission checks. Records have no workspace foreign key: mutable workspace metadata, relocation, archival or deletion cannot release a physical folder still accessible to an admitted run. There is no automatic mode change or reservation deletion.
+
+Migration [0338_absurd_vengeance.sql](../packages/db/src/migrations/0338_absurd_vengeance.sql) adds internal `execution_workspace_repository_access` provenance. Company/canonical-root source entries retain execution-workspace and source-project identities; reader entries retain the exact admitted run, task, agent and responsible user. New repository receipts also record their root at creation; legacy receipts receive no inferred origin. Shared project-source entries retain which physical owners require workspace write authority. Current admission, selection, requests and publication check the current task’s writer against those owners; retained past readers and file APIs still require only read authority. Genuine isolated copies retain source read access without requiring shared-folder write access. An existing linked worktree can recover a missing isolated-copy proof only after Git registration and its captured source owner are verified. Configured local sibling copies retain deny-only task/project source ownership on the bound task root before materialization; ordinary repository clones create no isolation proof. The shared root fence checks every reader against every source before admission and future publication, including tasks without repository requests. File APIs apply the same source privacy without writing provenance. These entries grant no authority and have no workspace or run deletion cascade; unavailable retained identity fails closed. Automatic provenance release is deferred, so a newly incompatible permission scope requires a separate physical root.
+
+Git-source capture checks the actual common Git storage directory and verified
+checkout owners. Separately stored metadata does not make its parent a checkout.
+When a linked worktree cannot identify its primary checkout, the service verifies
+company-known configured, execution, and retained roots against that metadata
+identity. A primary checkout identifies itself when its Git directory equals its
+common directory, including separate metadata layouts. Verified primary sources
+and linked worktrees with a verified registered primary avoid the fallback scan.
+
+Writable selection, source-copy preparation, admission, and publication check the trust policy of
+current and retained physical source projects. A projectless alias cannot bypass
+a source's sandbox requirement. An incompatible preset or boundary is rejected;
+the check never silently changes the selected execution environment. Admitted
+and retained readers use their persisted effective run policy; absence of a
+retained low-trust policy counts as standard. Live policy edits cannot relabel
+a standard local run as sandboxed. Read-only file access
+keeps its existing authorization rules.
+
+Source-copy checks retain deny-only ownership on failure but create a new
+isolated-copy proof only after physical identity, access, and trust checks pass.
+For low-trust sandbox runs, the harness also disables host worktree provisioning
+on fresh realization, reuse, and rebuild. This covers configured commands and
+the repository's built-in provision script; an empty configured command alone
+would still allow that fallback. The capability comes from the server's selected
+trust policy and environment, never repository configuration.
+
+After source authorization and retained-reader checks pass, the existing
+`source` and `project_source` kinds retain ownership on shared Git storage.
+Removing the original checkout cannot release private committed files in surviving
+worktrees. These records grant no authority and create no isolation proof. Denied
+source captures leave no new records. Worktree realization uses a verified checkout
+as its Git command directory, including when metadata sits inside another repository.
+
+No migration scans or copies existing agent home directories. Keep admitted native descriptors and recovery references until compatible controllers finish their persistence obligations. See [the architecture rollout contract](plans/2026-10-09-task-workspaces.md).

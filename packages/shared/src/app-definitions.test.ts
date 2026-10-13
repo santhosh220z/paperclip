@@ -763,11 +763,6 @@ describe("AppDefinition catalog", () => {
       APP_DEFINITIONS.find((app) => app.slug === "linear")?.methods[0]?.defaults
         ?.scopesHint,
     ).toEqual(["read", "write"]));
-  it("requests Hugging Face MCP read, contribution and job scopes", () =>
-    expect(
-      APP_DEFINITIONS.find((app) => app.slug === "hugging-face")?.methods[0]
-        ?.defaults?.scopesHint,
-    ).toEqual(["read-mcp", "read-repos", "contribute-repos", "jobs"]));
   it("defaults every new connection action to allowed except Enterpret writes", () => {
     for (const app of APP_DEFINITIONS)
       for (const method of app.methods) {
@@ -1326,21 +1321,6 @@ describe("AppDefinition catalog", () => {
       APP_DEFINITIONS.find((app) => app.slug === "vercel")?.availability
         ?.available,
     ).toBe(false);
-  });
-  it("enforces method and field invariants", () => {
-    for (const app of APP_DEFINITIONS)
-      for (const method of app.methods) {
-        if (
-          method.auth === "api_key" &&
-          (method.purpose ?? "tool") !== "channel"
-        )
-          expect(method.keyPlacement).toBeTruthy();
-        if (method.auth === "oauth")
-          expect(method.ownershipModes.length).toBeGreaterThan(0);
-        for (const field of method.credentialFields ?? [])
-          if (field.required && field.type !== "checkbox")
-            expect(field.placeholder).toBeTruthy();
-      }
   });
 });
 

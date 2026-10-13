@@ -262,6 +262,46 @@ function setInputValue(input: HTMLInputElement, value: string) {
   input.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
+function daytonaEnvironments() {
+  return [
+    makeEnvironment({ id: "local-1", name: "Local", driver: "local" }),
+    makeEnvironment({
+      id: "sandbox-1",
+      name: "Daytona",
+      driver: "sandbox",
+      config: { provider: "daytona" },
+    }),
+  ];
+}
+
+function e2bEnvironments() {
+  return [
+    makeEnvironment({ id: "local-1", name: "Local", driver: "local" }),
+    makeEnvironment({
+      id: "sandbox-1",
+      name: "E2B",
+      driver: "sandbox",
+      config: { provider: "e2b" },
+    }),
+  ];
+}
+
+function renderFormView(root: Root, queryClient: QueryClient, children: Parameters<Root["render"]>[0]) {
+  root.render(
+    <QueryClientProvider client={queryClient}>
+      <ToastProvider>
+        <TooltipProvider>{children}</TooltipProvider>
+      </ToastProvider>
+    </QueryClientProvider>,
+  );
+}
+
+function createFormQueryClient() {
+  return new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+}
+
 async function renderForm(
   environments: Environment[],
   agentOverrides: Partial<Agent> = {},
@@ -281,35 +321,24 @@ async function renderForm(
   document.body.appendChild(container);
   const root = createRoot(container);
   const onSave = vi.fn();
-  const queryClient = new QueryClient({
-    defaultOptions: {
-      queries: { retry: false },
-      mutations: { retry: false },
-    },
-  });
+  const queryClient = createFormQueryClient();
 
   await act(async () => {
-    root.render(
-      <QueryClientProvider client={queryClient}>
-        <ToastProvider>
-          <TooltipProvider>
-            <AgentConfigForm
-              mode="edit"
-              agent={makeAgent(agentOverrides)}
-              onSave={onSave}
-              hidePromptTemplate
-              content={options.content}
-              environmentVariablesPlacement={options.environmentVariablesPlacement}
-              hideInlineSave={options.hideInlineSave}
-              onDirtyChange={options.onDirtyChange}
-              onSaveActionChange={options.onSaveActionChange}
-              onCancelActionChange={options.onCancelActionChange}
-              showAdapterTypeField={false}
-              showAdapterTestEnvironmentButton={options.showAdapterTestEnvironmentButton ?? false}
-            />
-          </TooltipProvider>
-        </ToastProvider>
-      </QueryClientProvider>,
+    renderFormView(root, queryClient,
+      <AgentConfigForm
+        mode="edit"
+        agent={makeAgent(agentOverrides)}
+        onSave={onSave}
+        hidePromptTemplate
+        content={options.content}
+        environmentVariablesPlacement={options.environmentVariablesPlacement}
+        hideInlineSave={options.hideInlineSave}
+        onDirtyChange={options.onDirtyChange}
+        onSaveActionChange={options.onSaveActionChange}
+        onCancelActionChange={options.onCancelActionChange}
+        showAdapterTypeField={false}
+        showAdapterTestEnvironmentButton={options.showAdapterTestEnvironmentButton ?? false}
+      />
     );
   });
 
@@ -327,12 +356,7 @@ async function renderCreateForm(
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
-  const queryClient = new QueryClient({
-    defaultOptions: {
-      queries: { retry: false },
-      mutations: { retry: false },
-    },
-  });
+  const queryClient = createFormQueryClient();
 
   const values = {
     ...defaultCreateValues,
@@ -342,21 +366,15 @@ async function renderCreateForm(
   const onChange = vi.fn();
 
   await act(async () => {
-    root.render(
-      <QueryClientProvider client={queryClient}>
-        <ToastProvider>
-          <TooltipProvider>
-            <AgentConfigForm
-              mode="create"
-              values={values}
-              onChange={onChange}
-              hidePromptTemplate
-              showAdapterTypeField={false}
-              showAdapterTestEnvironmentButton={options.showAdapterTestEnvironmentButton ?? false}
-            />
-          </TooltipProvider>
-        </ToastProvider>
-      </QueryClientProvider>,
+    renderFormView(root, queryClient,
+      <AgentConfigForm
+        mode="create"
+        values={values}
+        onChange={onChange}
+        hidePromptTemplate
+        showAdapterTypeField={false}
+        showAdapterTestEnvironmentButton={options.showAdapterTestEnvironmentButton ?? false}
+      />
     );
   });
 
@@ -461,15 +479,7 @@ function findByAriaLabel(container: HTMLElement, label: string) {
 
 async function renderCodexSandbox(agentOverrides: Partial<Agent> = {}) {
   return renderForm(
-    [
-      makeEnvironment({ id: "local-1", name: "Local", driver: "local" }),
-      makeEnvironment({
-        id: "sandbox-1",
-        name: "Daytona",
-        driver: "sandbox",
-        config: { provider: "daytona" },
-      }),
-    ],
+    daytonaEnvironments(),
     { defaultEnvironmentId: "sandbox-1", ...agentOverrides },
     { showAdapterTestEnvironmentButton: true },
   );
@@ -480,15 +490,7 @@ async function renderCodexSandbox(agentOverrides: Partial<Agent> = {}) {
 // provider advertises the login pseudo-terminal capability the login needs.
 async function renderVendorSandbox(agentOverrides: Partial<Agent> = {}) {
   return renderForm(
-    [
-      makeEnvironment({ id: "local-1", name: "Local", driver: "local" }),
-      makeEnvironment({
-        id: "sandbox-1",
-        name: "Daytona",
-        driver: "sandbox",
-        config: { provider: "daytona" },
-      }),
-    ],
+    daytonaEnvironments(),
     { adapterType: "vendor_local", defaultEnvironmentId: "sandbox-1", ...agentOverrides },
     { showAdapterTestEnvironmentButton: true },
   );
@@ -500,15 +502,7 @@ async function renderVendorSandbox(agentOverrides: Partial<Agent> = {}) {
 // login needs.
 async function renderGrokSandbox(agentOverrides: Partial<Agent> = {}) {
   return renderForm(
-    [
-      makeEnvironment({ id: "local-1", name: "Local", driver: "local" }),
-      makeEnvironment({
-        id: "sandbox-1",
-        name: "Daytona",
-        driver: "sandbox",
-        config: { provider: "daytona" },
-      }),
-    ],
+    daytonaEnvironments(),
     { adapterType: "grok_local", defaultEnvironmentId: "sandbox-1", ...agentOverrides },
     { showAdapterTestEnvironmentButton: true },
   );
@@ -516,15 +510,7 @@ async function renderGrokSandbox(agentOverrides: Partial<Agent> = {}) {
 
 async function renderClaudeSandbox(agentOverrides: Partial<Agent> = {}) {
   return renderForm(
-    [
-      makeEnvironment({ id: "local-1", name: "Local", driver: "local" }),
-      makeEnvironment({
-        id: "sandbox-1",
-        name: "Daytona",
-        driver: "sandbox",
-        config: { provider: "daytona" },
-      }),
-    ],
+    daytonaEnvironments(),
     { adapterType: "claude_local", defaultEnvironmentId: "sandbox-1", ...agentOverrides },
     { showAdapterTestEnvironmentButton: true },
   );
@@ -534,15 +520,7 @@ async function renderCreateClaudeSandbox(
   valueOverrides: Partial<typeof defaultCreateValues> = {},
 ) {
   return renderCreateForm(
-    [
-      makeEnvironment({ id: "local-1", name: "Local", driver: "local" }),
-      makeEnvironment({
-        id: "sandbox-1",
-        name: "Daytona",
-        driver: "sandbox",
-        config: { provider: "daytona" },
-      }),
-    ],
+    daytonaEnvironments(),
     { adapterType: "claude_local", defaultEnvironmentId: "sandbox-1", ...valueOverrides },
     { showAdapterTestEnvironmentButton: true },
   );
@@ -560,9 +538,7 @@ async function renderStatefulCreateClaudeSandbox(environments: Environment[]) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-  });
+  const queryClient = createFormQueryClient();
 
   const valuesRef: { current: typeof defaultCreateValues } = {
     current: {
@@ -588,15 +564,7 @@ async function renderStatefulCreateClaudeSandbox(environments: Environment[]) {
   }
 
   await act(async () => {
-    root.render(
-      <QueryClientProvider client={queryClient}>
-        <ToastProvider>
-          <TooltipProvider>
-            <Harness />
-          </TooltipProvider>
-        </ToastProvider>
-      </QueryClientProvider>,
-    );
+    renderFormView(root, queryClient, <Harness />);
   });
 
   await flushReact();
@@ -967,15 +935,7 @@ describe("AgentConfigForm environment selector", () => {
   });
 
   it("shows concise Environment copy when one runnable non-local environment exists", async () => {
-    const result = await renderForm([
-      makeEnvironment({ id: "local-1", name: "Local", driver: "local" }),
-      makeEnvironment({
-        id: "sandbox-1",
-        name: "E2B",
-        driver: "sandbox",
-        config: { provider: "e2b" },
-      }),
-    ]);
+    const result = await renderForm(e2bEnvironments());
     roots.push(result.root);
 
     const text = result.container.textContent ?? "";
@@ -992,15 +952,7 @@ describe("AgentConfigForm environment selector", () => {
 
   it("shows the environment override for Grok local agents", async () => {
     const result = await renderForm(
-      [
-        makeEnvironment({ id: "local-1", name: "Local", driver: "local" }),
-        makeEnvironment({
-          id: "sandbox-1",
-          name: "E2B",
-          driver: "sandbox",
-          config: { provider: "e2b" },
-        }),
-      ],
+      e2bEnvironments(),
       { adapterType: "grok_local" },
     );
     roots.push(result.root);
@@ -1014,15 +966,7 @@ describe("AgentConfigForm environment selector", () => {
 
   it("shows the environment override for Kimi local agents", async () => {
     const result = await renderForm(
-      [
-        makeEnvironment({ id: "local-1", name: "Local", driver: "local" }),
-        makeEnvironment({
-          id: "sandbox-1",
-          name: "E2B",
-          driver: "sandbox",
-          config: { provider: "e2b" },
-        }),
-      ],
+      e2bEnvironments(),
       { adapterType: "kimi_local" },
     );
     roots.push(result.root);
@@ -1265,15 +1209,7 @@ describe("AgentConfigForm environment selector", () => {
     // no capability, so the panel stays hidden even after the auth-missing check.
     mockAgentsApi.testEnvironment.mockResolvedValue(AUTH_MISSING_RESULT);
     const result = await renderForm(
-      [
-        makeEnvironment({ id: "local-1", name: "Local", driver: "local" }),
-        makeEnvironment({
-          id: "sandbox-1",
-          name: "E2B",
-          driver: "sandbox",
-          config: { provider: "e2b" },
-        }),
-      ],
+      e2bEnvironments(),
       { adapterType: "codex_local", defaultEnvironmentId: "sandbox-1" },
       { showAdapterTestEnvironmentButton: true },
     );
@@ -1344,15 +1280,7 @@ describe("AgentConfigForm environment selector", () => {
   it("hides the Login button for a Claude sandbox whose provider lacks the setup-token login capability", async () => {
     mockAgentsApi.testEnvironment.mockResolvedValue(CLAUDE_AUTH_MISSING_RESULT);
     const result = await renderForm(
-      [
-        makeEnvironment({ id: "local-1", name: "Local", driver: "local" }),
-        makeEnvironment({
-          id: "sandbox-1",
-          name: "E2B",
-          driver: "sandbox",
-          config: { provider: "e2b" },
-        }),
-      ],
+      e2bEnvironments(),
       { adapterType: "claude_local", defaultEnvironmentId: "sandbox-1" },
       { showAdapterTestEnvironmentButton: true },
     );
@@ -1381,15 +1309,7 @@ describe("AgentConfigForm environment selector", () => {
       }),
     );
     const result = await renderForm(
-      [
-        makeEnvironment({ id: "local-1", name: "Local", driver: "local" }),
-        makeEnvironment({
-          id: "sandbox-1",
-          name: "Daytona",
-          driver: "sandbox",
-          config: { provider: "daytona" },
-        }),
-      ],
+      daytonaEnvironments(),
       { adapterType: "claude_local", defaultEnvironmentId: "sandbox-1" },
       { showAdapterTestEnvironmentButton: true },
     );
@@ -1407,15 +1327,7 @@ describe("AgentConfigForm environment selector", () => {
     // after the auth-missing check.
     mockAgentsApi.testEnvironment.mockResolvedValue(PTY_VENDOR_AUTH_MISSING_RESULT);
     const result = await renderForm(
-      [
-        makeEnvironment({ id: "local-1", name: "Local", driver: "local" }),
-        makeEnvironment({
-          id: "sandbox-1",
-          name: "E2B",
-          driver: "sandbox",
-          config: { provider: "e2b" },
-        }),
-      ],
+      e2bEnvironments(),
       { adapterType: "pty_vendor_local", defaultEnvironmentId: "sandbox-1" },
       { showAdapterTestEnvironmentButton: true },
     );
@@ -1432,15 +1344,7 @@ describe("AgentConfigForm environment selector", () => {
     // provider capability, not the adapter name.
     mockAgentsApi.testEnvironment.mockResolvedValue(PTY_VENDOR_AUTH_MISSING_RESULT);
     const result = await renderForm(
-      [
-        makeEnvironment({ id: "local-1", name: "Local", driver: "local" }),
-        makeEnvironment({
-          id: "sandbox-1",
-          name: "Daytona",
-          driver: "sandbox",
-          config: { provider: "daytona" },
-        }),
-      ],
+      daytonaEnvironments(),
       { adapterType: "pty_vendor_local", defaultEnvironmentId: "sandbox-1" },
       { showAdapterTestEnvironmentButton: true },
     );
@@ -1457,23 +1361,13 @@ describe("AgentConfigForm environment selector", () => {
     // lifts the feedback and renders `AdapterLoginPanel` from the lifted login
     // descriptor. Without the descriptor the Login button never appears.
     mockAgentsApi.testEnvironment.mockResolvedValue(AUTH_MISSING_RESULT);
-    mockEnvironmentsApi.list.mockResolvedValue([
-      makeEnvironment({ id: "local-1", name: "Local", driver: "local" }),
-      makeEnvironment({
-        id: "sandbox-1",
-        name: "Daytona",
-        driver: "sandbox",
-        config: { provider: "daytona" },
-      }),
-    ]);
+    mockEnvironmentsApi.list.mockResolvedValue(daytonaEnvironments());
 
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
     roots.push(root);
-    const queryClient = new QueryClient({
-      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-    });
+    const queryClient = createFormQueryClient();
 
     function LiftedFeedbackHarness() {
       const [login, setLogin] = useState<AdapterLoginDescriptor | null>(null);
@@ -1504,15 +1398,7 @@ describe("AgentConfigForm environment selector", () => {
     }
 
     await act(async () => {
-      root.render(
-        <QueryClientProvider client={queryClient}>
-          <ToastProvider>
-            <TooltipProvider>
-              <LiftedFeedbackHarness />
-            </TooltipProvider>
-          </ToastProvider>
-        </QueryClientProvider>,
-      );
+      renderFormView(root, queryClient, <LiftedFeedbackHarness />);
     });
     await flushReact();
 
@@ -1777,12 +1663,12 @@ describe("AgentConfigForm environment selector", () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container); roots.push(root);
-    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const queryClient = createFormQueryClient();
     await act(async () => {
-      root.render(<QueryClientProvider client={queryClient}><ToastProvider><TooltipProvider>
+      renderFormView(root, queryClient,
         <AdapterLoginPanel companyId="company-1" adapterType="grok_local" environmentId="new-sandbox"
-          aiConnection={{ ...intent, agentIds: [] }} chrome="onboarding" autoStart />
-      </TooltipProvider></ToastProvider></QueryClientProvider>);
+        aiConnection={{ ...intent, agentIds: [] }} chrome="onboarding" autoStart />
+      );
     });
     await flushUntil(() => Boolean(findButton(container, "Cancel previous sign-in and retry")));
     expect(mockAgentsApi.startAdapterAuthLogin).not.toHaveBeenCalled();
@@ -1814,25 +1700,17 @@ describe("AgentConfigForm environment selector", () => {
     document.body.appendChild(container);
     const root = createRoot(container);
     roots.push(root);
-    const queryClient = new QueryClient({
-      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-    });
+    const queryClient = createFormQueryClient();
 
     await act(async () => {
-      root.render(
-        <QueryClientProvider client={queryClient}>
-          <ToastProvider>
-            <TooltipProvider>
-              <AdapterLoginPanel
-                companyId="company-1"
-                adapterType="codex_local"
-                environmentId="sandbox-1"
-                chrome="onboarding"
-                autoStart
-              />
-            </TooltipProvider>
-          </ToastProvider>
-        </QueryClientProvider>,
+      renderFormView(root, queryClient,
+        <AdapterLoginPanel
+          companyId="company-1"
+          adapterType="codex_local"
+          environmentId="sandbox-1"
+          chrome="onboarding"
+          autoStart
+        />
       );
     });
     // Wait for the card itself, then assert it is actually there: an absence
@@ -1869,25 +1747,17 @@ describe("AgentConfigForm environment selector", () => {
     document.body.appendChild(container);
     const root = createRoot(container);
     roots.push(root);
-    const queryClient = new QueryClient({
-      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-    });
+    const queryClient = createFormQueryClient();
 
     await act(async () => {
-      root.render(
-        <QueryClientProvider client={queryClient}>
-          <ToastProvider>
-            <TooltipProvider>
-              <AdapterLoginPanel
-                companyId="company-1"
-                adapterType="codex_local"
-                environmentId="sandbox-1"
-                autoStart
-                onAccountBinding={onAccountBinding}
-              />
-            </TooltipProvider>
-          </ToastProvider>
-        </QueryClientProvider>,
+      renderFormView(root, queryClient,
+        <AdapterLoginPanel
+          companyId="company-1"
+          adapterType="codex_local"
+          environmentId="sandbox-1"
+          autoStart
+          onAccountBinding={onAccountBinding}
+        />
       );
     });
     await flushUntil(() => onAccountBinding.mock.calls.length > 0);
@@ -1900,6 +1770,7 @@ describe("AgentConfigForm environment selector", () => {
     // The panel narrates the bind as its own state, separate from the login's
     // success line — the bind is a second save that can still fail.
     await flushUntil(() => container.textContent?.includes("Agent bound to the signed-in account") ?? false);
+    expect(container.textContent).toContain("Agent bound to the signed-in account");
   });
 
   it("a failed bind save renders an explicit Retry instead of silently latching the claim", async () => {
@@ -1931,25 +1802,17 @@ describe("AgentConfigForm environment selector", () => {
     document.body.appendChild(container);
     const root = createRoot(container);
     roots.push(root);
-    const queryClient = new QueryClient({
-      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-    });
+    const queryClient = createFormQueryClient();
 
     await act(async () => {
-      root.render(
-        <QueryClientProvider client={queryClient}>
-          <ToastProvider>
-            <TooltipProvider>
-              <AdapterLoginPanel
-                companyId="company-1"
-                adapterType="codex_local"
-                environmentId="sandbox-1"
-                autoStart
-                onAccountBinding={onAccountBinding}
-              />
-            </TooltipProvider>
-          </ToastProvider>
-        </QueryClientProvider>,
+      renderFormView(root, queryClient,
+        <AdapterLoginPanel
+          companyId="company-1"
+          adapterType="codex_local"
+          environmentId="sandbox-1"
+          autoStart
+          onAccountBinding={onAccountBinding}
+        />
       );
     });
     await flushUntil(() => container.textContent?.includes("Could not bind this agent") ?? false);
@@ -2007,25 +1870,17 @@ describe("AgentConfigForm environment selector", () => {
     document.body.appendChild(container);
     const root = createRoot(container);
     roots.push(root);
-    const queryClient = new QueryClient({
-      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-    });
+    const queryClient = createFormQueryClient();
 
     await act(async () => {
-      root.render(
-        <QueryClientProvider client={queryClient}>
-          <ToastProvider>
-            <TooltipProvider>
-              <AdapterLoginPanel
-                companyId="company-1"
-                adapterType="codex_local"
-                environmentId="sandbox-1"
-                autoStart
-                onAccountBinding={onAccountBinding}
-              />
-            </TooltipProvider>
-          </ToastProvider>
-        </QueryClientProvider>,
+      renderFormView(root, queryClient,
+        <AdapterLoginPanel
+          companyId="company-1"
+          adapterType="codex_local"
+          environmentId="sandbox-1"
+          autoStart
+          onAccountBinding={onAccountBinding}
+        />
       );
     });
     await flushUntil(() => onAccountBinding.mock.calls.length === 1);
@@ -2079,25 +1934,17 @@ describe("AgentConfigForm environment selector", () => {
     document.body.appendChild(container);
     const root = createRoot(container);
     roots.push(root);
-    const queryClient = new QueryClient({
-      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-    });
+    const queryClient = createFormQueryClient();
 
     await act(async () => {
-      root.render(
-        <QueryClientProvider client={queryClient}>
-          <ToastProvider>
-            <TooltipProvider>
-              <AdapterLoginPanel
-                companyId="company-1"
-                adapterType="codex_local"
-                environmentId="sandbox-1"
-                autoStart
-                onAccountBinding={onAccountBinding}
-              />
-            </TooltipProvider>
-          </ToastProvider>
-        </QueryClientProvider>,
+      renderFormView(root, queryClient,
+        <AdapterLoginPanel
+          companyId="company-1"
+          adapterType="codex_local"
+          environmentId="sandbox-1"
+          autoStart
+          onAccountBinding={onAccountBinding}
+        />
       );
     });
     await flushUntil(() => container.textContent?.includes("Binding this agent") ?? false);
@@ -2130,7 +1977,7 @@ describe("AgentConfigForm environment selector", () => {
         <AgentConfigForm mode="edit" agent={saved} onSave={onSave} hidePromptTemplate showAdapterTypeField={false} />
       </>;
     }
-    await act(async () => root.render(<QueryClientProvider client={queryClient}><ToastProvider><TooltipProvider><Harness /></TooltipProvider></ToastProvider></QueryClientProvider>));
+    await act(async () => renderFormView(root, queryClient, <Harness />));
     await flushReact();
     const nameInput = container.querySelector<HTMLInputElement>('input[placeholder="Agent name"]')!;
     setInputValue(nameInput, "Unsaved name");
@@ -2182,23 +2029,13 @@ describe("AgentConfigForm environment selector", () => {
           releaseSaves.push(resolve);
         }),
     );
-    mockEnvironmentsApi.list.mockResolvedValue([
-      makeEnvironment({ id: "local-1", name: "Local", driver: "local" }),
-      makeEnvironment({
-        id: "sandbox-1",
-        name: "Daytona",
-        driver: "sandbox",
-        config: { provider: "daytona" },
-      }),
-    ]);
+    mockEnvironmentsApi.list.mockResolvedValue(daytonaEnvironments());
 
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
     roots.push(root);
-    const queryClient = new QueryClient({
-      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-    });
+    const queryClient = createFormQueryClient();
 
     // The harness swaps the agent object the way the page does after a save
     // refresh: same mounted form, new agent identity.
@@ -2218,15 +2055,7 @@ describe("AgentConfigForm environment selector", () => {
       );
     }
     await act(async () => {
-      root.render(
-        <QueryClientProvider client={queryClient}>
-          <ToastProvider>
-            <TooltipProvider>
-              <RefreshHarness />
-            </TooltipProvider>
-          </ToastProvider>
-        </QueryClientProvider>,
-      );
+      renderFormView(root, queryClient, <RefreshHarness />);
     });
     await flushReact();
 
@@ -2733,15 +2562,7 @@ describe("AgentConfigForm environment selector", () => {
       .mockResolvedValueOnce(staleList)
       .mockResolvedValue(freshList);
 
-    const result = await renderStatefulCreateClaudeSandbox([
-      makeEnvironment({ id: "local-1", name: "Local", driver: "local" }),
-      makeEnvironment({
-        id: "sandbox-1",
-        name: "Daytona",
-        driver: "sandbox",
-        config: { provider: "daytona" },
-      }),
-    ]);
+    const result = await renderStatefulCreateClaudeSandbox(daytonaEnvironments());
     roots.push(result.root);
 
     await runTest(result.container);
@@ -2781,24 +2602,16 @@ describe("AgentConfigForm environment selector", () => {
     document.body.appendChild(container);
     const root = createRoot(container);
     roots.push(root);
-    const queryClient = new QueryClient({
-      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-    });
+    const queryClient = createFormQueryClient();
 
     await act(async () => {
-      root.render(
-        <QueryClientProvider client={queryClient}>
-          <ToastProvider>
-            <TooltipProvider>
-              <AdapterLoginPanel
-                companyId="company-1"
-                adapterType="claude_local"
-                environmentId="sandbox-1"
-                onStored={onStored}
-              />
-            </TooltipProvider>
-          </ToastProvider>
-        </QueryClientProvider>,
+      renderFormView(root, queryClient,
+        <AdapterLoginPanel
+          companyId="company-1"
+          adapterType="claude_local"
+          environmentId="sandbox-1"
+          onStored={onStored}
+        />
       );
     });
     await startLogin(container);
@@ -2818,25 +2631,17 @@ describe("AgentConfigForm environment selector", () => {
     document.body.appendChild(container);
     const root = createRoot(container);
     roots.push(root);
-    const queryClient = new QueryClient({
-      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-    });
+    const queryClient = createFormQueryClient();
 
     await act(async () => {
-      root.render(
-        <QueryClientProvider client={queryClient}>
-          <ToastProvider>
-            <TooltipProvider>
-              <AdapterLoginPanel
-                companyId="company-1"
-                adapterType="claude_local"
-                environmentId="sandbox-1"
-                chrome="onboarding"
-                autoStart
-              />
-            </TooltipProvider>
-          </ToastProvider>
-        </QueryClientProvider>,
+      renderFormView(root, queryClient,
+        <AdapterLoginPanel
+          companyId="company-1"
+          adapterType="claude_local"
+          environmentId="sandbox-1"
+          chrome="onboarding"
+          autoStart
+        />
       );
     });
     // Wait for the card itself, then assert it is actually there: an absence
@@ -2858,24 +2663,16 @@ describe("AgentConfigForm environment selector", () => {
     document.body.appendChild(container);
     const root = createRoot(container);
     roots.push(root);
-    const queryClient = new QueryClient({
-      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-    });
+    const queryClient = createFormQueryClient();
 
     await act(async () => {
-      root.render(
-        <QueryClientProvider client={queryClient}>
-          <ToastProvider>
-            <TooltipProvider>
-              <AdapterLoginPanel
-                companyId="company-1"
-                adapterType="claude_local"
-                environmentId="sandbox-1"
-                onApplyStored={onApplyStored}
-              />
-            </TooltipProvider>
-          </ToastProvider>
-        </QueryClientProvider>,
+      renderFormView(root, queryClient,
+        <AdapterLoginPanel
+          companyId="company-1"
+          adapterType="claude_local"
+          environmentId="sandbox-1"
+          onApplyStored={onApplyStored}
+        />
       );
     });
     await flushUntil(() => Boolean(findButton(container, "Use saved login")));
@@ -2900,24 +2697,16 @@ describe("AgentConfigForm environment selector", () => {
     document.body.appendChild(container);
     const root = createRoot(container);
     roots.push(root);
-    const queryClient = new QueryClient({
-      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-    });
+    const queryClient = createFormQueryClient();
 
     await act(async () => {
-      root.render(
-        <QueryClientProvider client={queryClient}>
-          <ToastProvider>
-            <TooltipProvider>
-              <AdapterLoginPanel
-                companyId="company-1"
-                adapterType="claude_local"
-                environmentId="sandbox-1"
-                onApplyStored={onApplyStored}
-              />
-            </TooltipProvider>
-          </ToastProvider>
-        </QueryClientProvider>,
+      renderFormView(root, queryClient,
+        <AdapterLoginPanel
+          companyId="company-1"
+          adapterType="claude_local"
+          environmentId="sandbox-1"
+          onApplyStored={onApplyStored}
+        />
       );
     });
     await flushUntil(() => Boolean(findButton(container, "Sign in")));
@@ -3305,42 +3094,26 @@ describe("AgentConfigForm environment selector", () => {
         await flushFake();
       };
 
-      mockEnvironmentsApi.list.mockResolvedValue([
-        makeEnvironment({ id: "local-1", name: "Local", driver: "local" }),
-        makeEnvironment({
-          id: "sandbox-1",
-          name: "Daytona",
-          driver: "sandbox",
-          config: { provider: "daytona" },
-        }),
-      ]);
+      mockEnvironmentsApi.list.mockResolvedValue(daytonaEnvironments());
 
       const container = document.createElement("div");
       document.body.appendChild(container);
       const root = createRoot(container);
       roots.push(root);
-      const queryClient = new QueryClient({
-        defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-      });
+      const queryClient = createFormQueryClient();
       await act(async () => {
-        root.render(
-          <QueryClientProvider client={queryClient}>
-            <ToastProvider>
-              <TooltipProvider>
-                <AgentConfigForm
-                  mode="edit"
-                  agent={makeAgent({
-                    adapterType: "claude_local",
-                    defaultEnvironmentId: "sandbox-1",
-                  })}
-                  onSave={vi.fn()}
-                  hidePromptTemplate
-                  showAdapterTypeField={false}
-                  showAdapterTestEnvironmentButton
-                />
-              </TooltipProvider>
-            </ToastProvider>
-          </QueryClientProvider>,
+        renderFormView(root, queryClient,
+          <AgentConfigForm
+            mode="edit"
+            agent={makeAgent({
+              adapterType: "claude_local",
+              defaultEnvironmentId: "sandbox-1",
+            })}
+            onSave={vi.fn()}
+            hidePromptTemplate
+            showAdapterTypeField={false}
+            showAdapterTestEnvironmentButton
+          />
         );
       });
       await flushFake();
@@ -3627,44 +3400,28 @@ describe("AgentConfigForm create-mode Claude OAuth binding", () => {
 // environment. The helper returns the `onSave` spy so a test can read the patch
 // that a stored login sends to the agent-update path.
 async function renderEditClaudeSandbox(agentOverrides: Partial<Agent> = {}) {
-  mockEnvironmentsApi.list.mockResolvedValue([
-    makeEnvironment({ id: "local-1", name: "Local", driver: "local" }),
-    makeEnvironment({
-      id: "sandbox-1",
-      name: "Daytona",
-      driver: "sandbox",
-      config: { provider: "daytona" },
-    }),
-  ]);
+  mockEnvironmentsApi.list.mockResolvedValue(daytonaEnvironments());
 
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-  });
+  const queryClient = createFormQueryClient();
   const onSave = vi.fn().mockResolvedValue(undefined);
 
   await act(async () => {
-    root.render(
-      <QueryClientProvider client={queryClient}>
-        <ToastProvider>
-          <TooltipProvider>
-            <AgentConfigForm
-              mode="edit"
-              agent={makeAgent({
-                adapterType: "claude_local",
-                defaultEnvironmentId: "sandbox-1",
-                ...agentOverrides,
-              })}
-              onSave={onSave}
-              hidePromptTemplate
-              showAdapterTypeField={false}
-              showAdapterTestEnvironmentButton
-            />
-          </TooltipProvider>
-        </ToastProvider>
-      </QueryClientProvider>,
+    renderFormView(root, queryClient,
+      <AgentConfigForm
+        mode="edit"
+        agent={makeAgent({
+          adapterType: "claude_local",
+          defaultEnvironmentId: "sandbox-1",
+          ...agentOverrides,
+        })}
+        onSave={onSave}
+        hidePromptTemplate
+        showAdapterTypeField={false}
+        showAdapterTestEnvironmentButton
+      />
     );
   });
 

@@ -1,3 +1,4 @@
+import type { Attachment } from "chat";
 import { createHash } from "node:crypto";
 import type { chatDeliveries } from "@paperclipai/db";
 import type { ChatProvider } from "@paperclipai/shared";
@@ -221,3 +222,14 @@ export function telegramMessageSentAt(raw: unknown): Date | null {
   const sentAt = new Date(value * 1_000);
   return Number.isFinite(sentAt.getTime()) ? sentAt : null;
 }
+
+export function telegramMarkdownAttachment(text: string): Attachment {
+    const data = Buffer.from(text, "utf8");
+    return {
+      data,
+      mimeType: "text/markdown; charset=utf-8",
+      name: "paperclip-response.md",
+      size: data.byteLength,
+      type: "file",
+    };
+  }

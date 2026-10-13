@@ -68,6 +68,15 @@ const mockDb = {
   select: vi.fn(() => ({ from: () => Promise.resolve(mockCompanyRows) })),
 };
 
+function localAdminActor() {
+  return {
+    type: "board",
+    userId: "local-board",
+    source: "local_implicit",
+    isInstanceAdmin: true,
+  };
+}
+
 describe("instance settings routes", () => {
   const routeModules = hoistModuleGraph(registerModuleMocks, async () => {
     const [{ errorHandler }, { instanceSettingsRoutes }] = await Promise.all([
@@ -234,12 +243,7 @@ describe("instance settings routes", () => {
   });
 
   it("allows local board users to read and update experimental settings", async () => {
-    const app = await createApp({
-      type: "board",
-      userId: "local-board",
-      source: "local_implicit",
-      isInstanceAdmin: true,
-    });
+    const app = await createApp(localAdminActor());
 
     const getRes = await request(app).get("/api/instance/settings/experimental");
     expect(getRes.status).toBe(200);
@@ -273,12 +277,7 @@ describe("instance settings routes", () => {
   }, 10_000);
 
   it("does not expose the retired liveness auto-recovery endpoints", async () => {
-    const app = await createApp({
-      type: "board",
-      userId: "local-board",
-      source: "local_implicit",
-      isInstanceAdmin: true,
-    });
+    const app = await createApp(localAdminActor());
 
     await request(app)
       .post("/api/instance/settings/experimental/issue-graph-liveness-auto-recovery/preview")
@@ -303,12 +302,7 @@ describe("instance settings routes", () => {
   });
 
   it("accepts the instance-wide Streamlined UI preference", async () => {
-    const app = await createApp({
-      type: "board",
-      userId: "local-board",
-      source: "local_implicit",
-      isInstanceAdmin: true,
-    });
+    const app = await createApp(localAdminActor());
 
     await request(app)
       .patch("/api/instance/settings/experimental")
@@ -321,12 +315,7 @@ describe("instance settings routes", () => {
   });
 
   it("strips server-managed worktree run execution fields before updating experimental settings", async () => {
-    const app = await createApp({
-      type: "board",
-      userId: "local-board",
-      source: "local_implicit",
-      isInstanceAdmin: true,
-    });
+    const app = await createApp(localAdminActor());
 
     await request(app)
       .patch("/api/instance/settings/experimental")
@@ -343,12 +332,7 @@ describe("instance settings routes", () => {
   });
 
   it("allows local board users to read and update the instance default environment", async () => {
-    const app = await createApp({
-      type: "board",
-      userId: "local-board",
-      source: "local_implicit",
-      isInstanceAdmin: true,
-    });
+    const app = await createApp(localAdminActor());
 
     const getRes = await request(app).get("/api/instance/settings");
     expect(getRes.status).toBe(200);
@@ -379,12 +363,7 @@ describe("instance settings routes", () => {
       envVars: {},
       metadata: { managedByPaperclip: true, managedDefaultStamped: true },
     });
-    const app = await createApp({
-      type: "board",
-      userId: "local-board",
-      source: "local_implicit",
-      isInstanceAdmin: true,
-    });
+    const app = await createApp(localAdminActor());
 
     const patchRes = await request(app)
       .patch("/api/instance/settings")
@@ -419,12 +398,7 @@ describe("instance settings routes", () => {
       metadata: { managedByPaperclip: true, managedDefaultStamped: true },
     });
     mockEnvironmentService.update.mockRejectedValue(new Error("metadata write failed"));
-    const app = await createApp({
-      type: "board",
-      userId: "local-board",
-      source: "local_implicit",
-      isInstanceAdmin: true,
-    });
+    const app = await createApp(localAdminActor());
 
     const patchRes = await request(app)
       .patch("/api/instance/settings")
@@ -436,12 +410,7 @@ describe("instance settings routes", () => {
 
   it("rejects unknown defaultEnvironmentId values with 422", async () => {
     mockEnvironmentService.getById.mockResolvedValue(null);
-    const app = await createApp({
-      type: "board",
-      userId: "local-board",
-      source: "local_implicit",
-      isInstanceAdmin: true,
-    });
+    const app = await createApp(localAdminActor());
 
     const res = await request(app)
       .patch("/api/instance/settings")
@@ -453,12 +422,7 @@ describe("instance settings routes", () => {
   });
 
   it("allows local board users to update guarded dev-server auto-restart", async () => {
-    const app = await createApp({
-      type: "board",
-      userId: "local-board",
-      source: "local_implicit",
-      isInstanceAdmin: true,
-    });
+    const app = await createApp(localAdminActor());
 
     await request(app)
       .patch("/api/instance/settings/experimental")
@@ -473,12 +437,7 @@ describe("instance settings routes", () => {
   });
 
   it("allows local board users to update external object detection", async () => {
-    const app = await createApp({
-      type: "board",
-      userId: "local-board",
-      source: "local_implicit",
-      isInstanceAdmin: true,
-    });
+    const app = await createApp(localAdminActor());
 
     await request(app)
       .patch("/api/instance/settings/experimental")
@@ -491,12 +450,7 @@ describe("instance settings routes", () => {
   });
 
   it("allows local board users to update built-in agents", async () => {
-    const app = await createApp({
-      type: "board",
-      userId: "local-board",
-      source: "local_implicit",
-      isInstanceAdmin: true,
-    });
+    const app = await createApp(localAdminActor());
 
     await request(app)
       .patch("/api/instance/settings/experimental")
@@ -509,12 +463,7 @@ describe("instance settings routes", () => {
   });
 
   it("allows local board users to update the goals sidebar link", async () => {
-    const app = await createApp({
-      type: "board",
-      userId: "local-board",
-      source: "local_implicit",
-      isInstanceAdmin: true,
-    });
+    const app = await createApp(localAdminActor());
 
     await request(app)
       .patch("/api/instance/settings/experimental")
@@ -527,12 +476,7 @@ describe("instance settings routes", () => {
   });
 
   it("allows local board users to update the server info debug view", async () => {
-    const app = await createApp({
-      type: "board",
-      userId: "local-board",
-      source: "local_implicit",
-      isInstanceAdmin: true,
-    });
+    const app = await createApp(localAdminActor());
 
     await request(app)
       .patch("/api/instance/settings/experimental")
@@ -545,12 +489,7 @@ describe("instance settings routes", () => {
   });
 
   it("allows local board users to update environment controls", async () => {
-    const app = await createApp({
-      type: "board",
-      userId: "local-board",
-      source: "local_implicit",
-      isInstanceAdmin: true,
-    });
+    const app = await createApp(localAdminActor());
 
     await request(app)
       .patch("/api/instance/settings/experimental")
@@ -582,12 +521,7 @@ describe("instance settings routes", () => {
   });
 
   it("allows local board users to read and update general settings", async () => {
-    const app = await createApp({
-      type: "board",
-      userId: "local-board",
-      source: "local_implicit",
-      isInstanceAdmin: true,
-    });
+    const app = await createApp(localAdminActor());
 
     const getRes = await request(app).get("/api/instance/settings/general");
     expect(getRes.status).toBe(200);

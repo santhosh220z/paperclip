@@ -2332,6 +2332,34 @@
       "when": 1791807836288,
       "tag": "0334_rare_slipstream",
       "breakpoints": true
+    },
+    {
+      "idx": 335,
+      "version": "7",
+      "when": 1791832982875,
+      "tag": "0335_absurd_bulldozer",
+      "breakpoints": true
+    },
+    {
+      "idx": 336,
+      "version": "7",
+      "when": 1791837392742,
+      "tag": "0336_big_crystal",
+      "breakpoints": true
+    },
+    {
+      "idx": 337,
+      "version": "7",
+      "when": 1791837407237,
+      "tag": "0337_exotic_proemial_gods",
+      "breakpoints": true
+    },
+    {
+      "idx": 338,
+      "version": "7",
+      "when": 1791837431016,
+      "tag": "0338_absurd_vengeance",
+      "breakpoints": true
     }
   ]
 }

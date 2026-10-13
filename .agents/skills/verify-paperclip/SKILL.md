@@ -5,9 +5,13 @@ description: Launch an isolated Paperclip instance, drive its real web UI or CLI
 
 # Verify Paperclip
 
-Use the repo-root [feature map](../../../feature-map/README.md) to select
-verification recipes. Read the relevant feature file before driving it. Report
-any recipe drift with evidence; map updates belong to
+Read the [map contract](../../../maps/README.md), then use the
+[feature map](../../../maps/feature-map/README.md) to select user verification
+recipes. For API/agent access, read the same-named
+[agent access companion](../../../maps/agent-access-map/README.md) and use the
+actual permitted agent identity, target and work mode. Follow existing API/runner/MCP
+fixtures for access proof; a board request does not prove agent access. Report
+recipe or access drift with evidence; map updates belong to
 [maintain-verification-skill](../maintain-verification-skill/SKILL.md).
 Read [development instructions](../../../doc/DEVELOPING.md) for current commands.
 

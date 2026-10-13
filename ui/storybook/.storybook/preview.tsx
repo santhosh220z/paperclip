@@ -850,6 +850,73 @@ const preview: Preview = {
     },
   },
   parameters: {
+    options: {
+      storySort: {
+        order: [
+          "Overview",
+          "Getting started and access",
+          [
+            "Onboarding and first work",
+            "Login, invitations, and access",
+            "Companies and portability"
+          ],
+          "Tasks and conversations",
+          [
+            "Task creation and lifecycle",
+            "Delegation, dependencies, and signoff",
+            "Inbox, decisions, and search",
+            "Agent conversations and project handoff",
+            "Questions and approvals",
+            "Steering and queued messages",
+            "Documents, attachments, and work products"
+          ],
+          "Agents and reusable capabilities",
+          [
+            "Hiring, configuration, and organization",
+            "Runs, harnesses, and model accounts",
+            "Skills and Skill Studio",
+            "Team packages and installation"
+          ],
+          "Projects and execution",
+          [
+            "Projects and repositories",
+            "Goals and work alignment",
+            "Workspaces, services, and files",
+            "Execution environments",
+            "Recovery"
+          ],
+          "Apps, channels, and extensions",
+          [
+            "Connection setup",
+            "App access and action permissions",
+            "External chat and email",
+            "Tool gateways and access profiles",
+            "Secrets and proposals",
+            "Plugins"
+          ],
+          "Automation and structured work",
+          [
+            "Routines, schedules, and triggers",
+            "Pipelines, review queues, and learnings",
+            "Cases",
+            "Status cards"
+          ],
+          "Oversight and operation",
+          [
+            "Costs and budgets",
+            "Dashboards and audit trails",
+            "Navigation, profile, and announcements",
+            "Instance operations",
+            "CLI/API and local worktrees"
+          ],
+          "Contributor surfaces",
+          [
+            "Developer previews and diagnostic labs"
+          ],
+          "Foundations"
+        ],
+      },
+    },
     actions: { argTypesRegex: "^on[A-Z].*" },
     a11y: {
       test: "error",

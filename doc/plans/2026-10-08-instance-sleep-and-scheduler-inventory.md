@@ -444,8 +444,13 @@ Longer polling intervals alone do not complete an item.
   running sessions and pauses without rescheduling until an endpoint change.
   Tests exercise real producers with deferred fast paths disabled, retry and
   startup recovery, stale-send quarantine, and zero scans after settlement.
-  Remaining **1s** maintenance: provider runtimes, Telegram maintenance, failed
-  chat-run retries, run milestone/wake-notice projection, GitHub operation
+  Failed chat-run retries now also use commit wakes and durable deadlines from
+  existing action rows. Issued retries honor `retryAt`; processing claims wait
+  for both stale-claim expiry and any saved retry time. Startup recovers unfinished
+  requests. Claim and settlement writes signal in their own short transactions,
+  with agent wakeup outside those transactions. Empty and terminal queues disarm.
+  Remaining **1s** maintenance: provider runtimes, Telegram maintenance,
+  run milestone/wake-notice projection, GitHub operation
   recovery, and Teams protocol maintenance. GitHub pre-ingress recovery
   must still inspect provider history: a lost callback has no local queue row.
   This slice does **not** yet make the whole chat subsystem quiet. Independent

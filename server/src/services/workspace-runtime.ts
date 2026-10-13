@@ -1,3 +1,5 @@
+import { sanitizeRuntimeServiceBaseEnv } from "./runtime-service-env.js";
+export { sanitizeRuntimeServiceBaseEnv } from "./runtime-service-env.js";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import fs from "node:fs/promises";
@@ -681,23 +683,6 @@ export async function ensureServerWorkspaceLinksCurrent(
   );
 }
 
-export function sanitizeRuntimeServiceBaseEnv(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...baseEnv };
-  for (const key of Object.keys(env)) {
-    if (key.startsWith("PAPERCLIP_")) {
-      delete env[key];
-    }
-  }
-  // These origin settings belong to the parent instance. Letting them leak into a
-  // managed worktree runtime can send auth cookies and OAuth callbacks to the wrong
-  // Paperclip instance. Runtime/service overrides are merged back after sanitizing.
-  delete env.BETTER_AUTH_URL;
-  delete env.BETTER_AUTH_BASE_URL;
-  delete env.DATABASE_URL;
-  delete env.npm_config_tailscale_auth;
-  delete env.npm_config_authenticated_private;
-  return env;
-}
 
 function stableRuntimeServiceId(input: {
   adapterType: string;
@@ -2717,10 +2702,17 @@ function parseGitWorktreeListPorcelain(raw: string): GitWorktreeListEntry[] {
 }
 
 async function resolveGitOwnerRepoRoot(cwd: string): Promise<string> {
-  const checkoutRoot = path.resolve(await runGit(["rev-parse", "--show-toplevel"], cwd));
-  const commonDir = await runGit(["rev-parse", "--git-common-dir"], checkoutRoot).catch(() => null);
-  if (!commonDir) return checkoutRoot;
-  return path.dirname(path.resolve(checkoutRoot, commonDir));
+  const checkoutRoot = await fs.realpath(path.resolve(await runGit(["rev-parse", "--show-toplevel"], cwd)));
+  try {
+    const commonDir = await fs.realpath(path.resolve(checkoutRoot, await runGit(["rev-parse", "--git-common-dir"], checkoutRoot)));
+    const candidate = path.dirname(commonDir);
+    const candidateRoot = await fs.realpath(path.resolve(await runGit(["rev-parse", "--show-toplevel"], candidate)));
+    const candidateGitDir = await fs.realpath(path.resolve(candidate, await runGit(["rev-parse", "--absolute-git-dir"], candidate)));
+    const candidateCommonDir = await fs.realpath(path.resolve(candidate, await runGit(["rev-parse", "--git-common-dir"], candidate)));
+    if (candidateRoot === candidate && candidateGitDir === commonDir && candidateCommonDir === commonDir) return candidateRoot;
+  } catch {
+  }
+  return checkoutRoot;
 }
 
 async function findRegisteredGitWorktreeByBranch(repoRoot: string, branchName: string): Promise<string | null> {
@@ -3242,8 +3234,10 @@ async function provisionExecutionWorktree(input: {
   issue: ExecutionWorkspaceIssueRef | null;
   agent: ExecutionWorkspaceAgentRef;
   created: boolean;
+  skipHostProvision?: boolean;
   recorder?: WorkspaceOperationRecorder | null;
 }) {
+  if (input.skipHostProvision) return;
   const provisionCommand = resolveWorkspaceProvisionCommand(input.strategy, input.repoRoot);
   if (!provisionCommand) return;
   const resolvedProvisionCommand = resolveRepoManagedWorkspaceCommand(provisionCommand, input.repoRoot);
@@ -3338,6 +3332,9 @@ export async function realizeExecutionWorkspace(input: {
   enableWorkspaceDirtyQuarantineRepair?: boolean;
   recorder?: WorkspaceOperationRecorder | null;
   resolveGitAuth?: GitRemoteAuthProvider | null;
+  skipHostProvision?: boolean;
+  beforeSourceCopy?: (sourceCwd: string, targetCwd: string) => Promise<void>;
+  afterSourceCopy?: (sourceCwd: string, targetCwd: string) => Promise<void>;
 }): Promise<RealizedExecutionWorkspace> {
   const rawStrategy = parseObject(input.config.workspaceStrategy);
   const strategyType = asString(rawStrategy.type, "project_primary");
@@ -3419,6 +3416,7 @@ export async function realizeExecutionWorkspace(input: {
       },
     );
   }
+  await input.beforeSourceCopy?.(repoRoot, worktreePath);
   let pendingForwardBranchReconcile: PendingForwardBranchReconcile | null = null;
   const configuredBaseRef = typeof rawStrategy.baseRef === "string" && rawStrategy.baseRef.length > 0
     ? rawStrategy.baseRef
@@ -3441,6 +3439,7 @@ export async function realizeExecutionWorkspace(input: {
   await fs.mkdir(worktreeParentDir, { recursive: true });
 
   async function reuseExistingWorktree(reusablePath: string, effectiveBranchName = branchName, extraWarnings: string[] = []) {
+    if (reusablePath !== worktreePath) await input.beforeSourceCopy?.(repoRoot, reusablePath);
     // An exact-branch attach must never move the requested branch, so skip
     // the unstarted-worktree fast-forward that template-derived reuse gets.
     const refresh = currentBaseRefSha && !requestedExistingBranch
@@ -3482,7 +3481,9 @@ export async function realizeExecutionWorkspace(input: {
         }),
       });
     }
+    await input.afterSourceCopy?.(repoRoot, reusablePath);
     await provisionExecutionWorktree({
+      skipHostProvision: input.skipHostProvision,
       strategy: rawStrategy,
       base: input.base,
       repoRoot,
@@ -3640,7 +3641,9 @@ export async function realizeExecutionWorkspace(input: {
         },
       );
     }
+    await input.afterSourceCopy?.(repoRoot, worktreePath);
     await provisionExecutionWorktree({
+      skipHostProvision: input.skipHostProvision,
       strategy: rawStrategy,
       base: input.base,
       repoRoot,
@@ -3735,7 +3738,9 @@ export async function realizeExecutionWorkspace(input: {
       return await reuseExistingWorktree(reusablePath);
     }
   }
+  await input.afterSourceCopy?.(repoRoot, worktreePath);
   await provisionExecutionWorktree({
+    skipHostProvision: input.skipHostProvision,
     strategy: rawStrategy,
     base: input.base,
     repoRoot,
@@ -3788,6 +3793,9 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
   enableWorkspaceDirtyQuarantineRepair?: boolean;
   recorder?: WorkspaceOperationRecorder | null;
   resolveGitAuth?: GitRemoteAuthProvider | null;
+  skipHostProvision?: boolean;
+  beforeSourceCopy?: (sourceCwd: string, targetCwd: string) => Promise<void>;
+  afterSourceCopy?: (sourceCwd: string, targetCwd: string) => Promise<void>;
 }): Promise<RealizedExecutionWorkspace | null> {
   const cwd = asString(input.workspace.cwd ?? input.workspace.providerRef, "").trim();
   if (!cwd) return null;
@@ -3796,8 +3804,8 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
   const realized: RealizedExecutionWorkspace = {
     baseCwd: input.base.baseCwd,
     source: input.workspace.mode === "shared_workspace" ? "project_primary" : "task_session",
-    projectId: input.workspace.projectId ?? input.base.projectId,
-    workspaceId: input.workspace.projectWorkspaceId ?? input.base.workspaceId,
+    projectId: input.workspace.projectId === undefined ? input.base.projectId : input.workspace.projectId,
+    workspaceId: input.workspace.projectWorkspaceId === undefined ? input.base.workspaceId : input.workspace.projectWorkspaceId,
     repoUrl: input.workspace.repoUrl ?? input.base.repoUrl,
     repoRef: input.workspace.baseRef ?? input.base.repoRef,
     additionalWorkspaces: input.base.additionalWorkspaces ?? [],
@@ -3840,6 +3848,7 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
     );
   }
   const repoRoot = await runGit(["rev-parse", "--show-toplevel"], baseCwd);
+  await input.beforeSourceCopy?.(repoRoot, realized.worktreePath ?? cwd);
   const recordedBaseRefSha = readRecordedBaseRefSha(input.workspace.metadata);
   if (await directoryExists(cwd)) {
     const reuseBaseRef = input.workspace.baseRef ?? input.base.repoRef ?? null;
@@ -3918,7 +3927,9 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
     });
     realized.warnings = [...repairWarnings, ...baseRefreshWarnings, ...baseDrift.warnings];
     realized.baseRefSha = refresh.baseRefSha ?? recordedBaseRefSha ?? baseDrift.branchBaseRefSha ?? baseDrift.currentBaseRefSha;
+    await input.afterSourceCopy?.(repoRoot, realized.worktreePath ?? cwd);
     await provisionExecutionWorktree({
+      skipHostProvision: input.skipHostProvision,
       strategy: {
         type: "git_worktree",
         ...(provisionCommand ? { provisionCommand } : {}),
@@ -4010,7 +4021,9 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
     skipRefresh: true,
   });
 
+  await input.afterSourceCopy?.(repoRoot, worktreePath);
   await provisionExecutionWorktree({
+    skipHostProvision: input.skipHostProvision,
     strategy: {
       type: "git_worktree",
       ...(provisionCommand ? { provisionCommand } : {}),
@@ -7435,6 +7448,7 @@ type EnsureRuntimeServicesForRunInput = {
   workspace: RealizedExecutionWorkspace;
   executionWorkspaceId?: string | null;
   config: Record<string, unknown>;
+  skipHostProvision?: boolean;
   adapterEnv: Record<string, string>;
   onLog?: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
   recorder?: WorkspaceOperationRecorder | null;
@@ -7451,7 +7465,9 @@ async function ensureRuntimeServicesForRunInvocation(
   });
   const acquiredServiceIds: string[] = [];
   const refs: RuntimeServiceRef[] = [];
-  const runtimeProvision = resolveRuntimeProvision(input);
+  const runtimeProvision = input.skipHostProvision
+    ? { command: "", kind: null }
+    : resolveRuntimeProvision(input);
   const runtimeProvisionCommand = runtimeProvision.command;
   const provisionCoordinator = createRuntimeProvisionCoordinator();
   const allowFixedPortFallback = await isPersistedIsolatedExecutionWorkspace({

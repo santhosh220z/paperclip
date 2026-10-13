@@ -152,9 +152,21 @@ Notes:
 
 ## 7. Verification Before Hand-off
 
-[feature-map/README.md](feature-map/README.md) is an optional reference for user
+[maps/feature-map/README.md](maps/feature-map/README.md) is an optional reference for user
 entry points, verification recipes, and coverage gaps. The map records coverage
 scope, not proof that a live journey passed.
+
+The sibling [agent access map](maps/agent-access-map/README.md) records APIs,
+agent entry points and permission boundaries using the same capability IDs.
+Follow [the map contract](maps/README.md): update affected entries when mapped
+behavior or access changes, and run `node scripts/check-maps.mjs` after map edits.
+Its structural checks do not prove live behavior or authorization.
+
+Storybook has a downstream [feature catalog](maps/storybook-map/README.md).
+Use `maintain-storybook` for story/fixture drift and `review-storybook` for browser
+evidence. Keep the feature-map skills independent of this catalog. After story
+or declared review-source changes, reconcile affected entries and run
+`node scripts/storybook-catalog.mjs`; its checks are not production acceptance.
 
 Default local/agent test path:
 

@@ -19,15 +19,15 @@ export function removeTestHome(home: string): void {
   try {
     fs.rmSync(home, options);
   } catch (error) {
-    if (!isPermissionError(error)) throw error;
+    if (!isReadOnlyDirectoryRemovalError(error)) throw error;
     makeDirectoriesWritable(home);
     fs.rmSync(home, options);
   }
 }
 
-function isPermissionError(error: unknown): boolean {
+function isReadOnlyDirectoryRemovalError(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException | null)?.code;
-  return code === "EACCES" || code === "EPERM";
+  return code === "EACCES" || code === "EPERM" || code === "ENOTEMPTY";
 }
 
 function makeDirectoriesWritable(directory: string): void {

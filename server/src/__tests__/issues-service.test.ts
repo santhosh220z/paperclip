@@ -21,6 +21,7 @@ import {
   issueAccessGrants,
   issuePlanDecompositions,
   issueReadStates,
+  issueRecoveryActions,
   issueRelations,
   issueThreadInteractions,
   issueWorkProducts,
@@ -46,6 +47,8 @@ import {
   readIssueCommentRunLogText,
 } from "../services/issues.ts";
 import { getRunLogStore } from "../services/run-log-store.js";
+import { terminalizeLegacyExecution } from "../services/legacy-execution-recovery.js";
+import { settleUnrecoverableExecutions } from "../services/execution-recovery-resolution.js";
 import {
   WORKSPACE_WORKTREE_REQUIRES_PROJECT_CODE,
   WORKSPACE_WORKTREE_REQUIRES_PROJECT_MESSAGE,
@@ -666,6 +669,39 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
     await expect(svc.list(companyId, { touchedByUserId: userId })).resolves.toEqual([
       expect.objectContaining({ id: issueId }),
     ]);
+  });
+
+  it("ignores historical reader-attributed recovery cleanup without hiding explicit recovery decisions", async () => {
+    const companyId = await seedAssignableAgentCompany();
+    const userId = "board-user";
+    const old = new Date("2026-03-26T10:00:00Z");
+    const recent = new Date("2026-03-26T15:00:00Z");
+    const variants = [
+      { id: randomUUID(), details: { source: "source_revalidation", trigger: "read_projection" }, counts: false },
+      { id: randomUUID(), details: null, counts: true },
+      { id: randomUUID(), details: { outcome: "restored" }, counts: true },
+      { id: randomUUID(), details: { source: "source_revalidation", trigger: "issue_update" }, counts: true },
+    ];
+    await db.insert(issues).values(variants.map(({ id }) => ({
+      id, companyId, title: "Recovery audit", status: "done", updatedAt: old,
+    })));
+    await db.insert(activityLog).values(variants.map(({ id, details }) => ({
+      companyId, actorType: "user", actorId: userId, action: "issue.recovery_action_resolved",
+      entityType: "issue", entityId: id, details, createdAt: recent,
+    })));
+    await db.insert(issueComments).values(variants.map(({ id }) => ({
+      companyId, issueId: id, authorUserId: "other-user", body: "An older update", createdAt: old,
+    })));
+
+    const expectedIds = variants.filter(v => v.counts).map(v => v.id).sort();
+    expect((await svc.list(companyId, { touchedByUserId: userId })).map(v => v.id).sort()).toEqual(expectedIds);
+    expect(await svc.countUnreadTouchedByUser(companyId, userId)).toBe(expectedIds.length);
+    const rows = await svc.list(companyId, {});
+    for (const variant of variants) {
+      expect(rows.find(v => v.id === variant.id)?.lastActivityAt).toEqual(variant.counts ? recent : old);
+    }
+    // Audit evidence is preserved, including the wrongly attributed old row.
+    expect(await db.select().from(activityLog).where(eq(activityLog.companyId, companyId))).toHaveLength(variants.length);
   });
 
   function agentRow(companyId: string, input: {
@@ -5458,7 +5494,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     });
   });
 
-  it("derives project identity when an update adds workspace linkage to a projectless issue", async () => {
+  it("preserves projectless organization when an update adds workspace linkage", async () => {
     const companyId = randomUUID();
     const projectId = randomUUID();
     const projectWorkspaceId = randomUUID();
@@ -5499,7 +5535,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
       projectWorkspaceId,
     });
 
-    expect(updated?.projectId).toBe(projectId);
+    expect(updated?.projectId).toBeNull();
     expect(updated?.projectWorkspaceId).toBe(projectWorkspaceId);
   });
 
@@ -7015,6 +7051,7 @@ describeEmbeddedPostgres("issueService.assertCheckoutOwner stale checkout adopti
     await db.delete(goals);
     await db.delete(agents);
     await db.delete(instanceSettings);
+    await db.delete(companyMemberships);
     await db.delete(companies);
   });
 
@@ -7102,6 +7139,67 @@ describeEmbeddedPostgres("issueService.assertCheckoutOwner stale checkout adopti
 
     return { issueId, assigneeAgentId, actorAgentId, staleRunId, actorRunId };
   }
+
+  it.each(["succeeded", "failed"])("preserves a human handoff when the outgoing legacy run later %s", async status => {
+    const seeded = await seedOwnershipIssue({ checkoutStatus: "failed" });
+    const original = await svc.getById(seeded.issueId);
+    await db.insert(companyMemberships).values({
+      companyId: original!.companyId,
+      principalType: "user",
+      principalId: "handoff-reviewer",
+      status: "active",
+    });
+    await db.update(heartbeatRuns).set({
+      contextSnapshot: { issueId: seeded.issueId },
+    }).where(eq(heartbeatRuns.id, seeded.actorRunId));
+    await svc.assertCheckoutOwner(seeded.issueId, seeded.actorAgentId, seeded.actorRunId);
+
+    const handoff = await svc.update(seeded.issueId, {
+      assigneeAgentId: null,
+      assigneeUserId: "handoff-reviewer",
+      status: "in_review",
+      actorAgentId: seeded.actorAgentId,
+      actorRunId: seeded.actorRunId,
+    });
+    expect(handoff).toMatchObject({
+      assigneeAgentId: null,
+      assigneeUserId: "handoff-reviewer",
+      status: "in_review",
+      checkoutRunId: null,
+      executionRunId: null,
+    });
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, seeded.actorRunId));
+    expect(run!.status).toBe("running");
+    await expect(svc.assertCheckoutOwner(seeded.issueId, seeded.actorAgentId, seeded.actorRunId))
+      .rejects.toMatchObject({ status: 409 });
+    await expect(svc.update(seeded.issueId, {
+      title: "Late outgoing edit",
+      actorAgentId: seeded.actorAgentId,
+      actorRunId: seeded.actorRunId,
+    })).rejects.toMatchObject({ status: 403, details: { code: "issue_handed_off" } });
+
+    await terminalizeLegacyExecution({
+      db,
+      run: run!,
+      status,
+      fromStatuses: ["running"],
+      reconcileIfNeeded: true,
+      patch: { finishedAt: new Date(), ...(status === "failed" ? { errorCode: "process_lost" } : {}) },
+    });
+    await settleUnrecoverableExecutions(db);
+    await expect(svc.update(seeded.issueId, {
+      status: "done",
+      actorAgentId: seeded.actorAgentId,
+      actorRunId: seeded.actorRunId,
+    })).rejects.toMatchObject({ status: 403, details: { code: "issue_handed_off" } });
+    expect(await svc.getById(seeded.issueId)).toMatchObject({
+      status: "in_review",
+      assigneeAgentId: null,
+      assigneeUserId: "handoff-reviewer",
+    });
+    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, seeded.issueId)))
+      .toHaveLength(0);
+  });
 
   it("lets the current assignee adopt a stale terminal checkout owner", async () => {
     const seeded = await seedOwnershipIssue({ checkoutStatus: "failed" });

@@ -9,6 +9,15 @@ A completed workspace barrier is reread
 under ownership before export, and a committed coordinator cannot be overwritten
 by a late failure receipt.
 
+An unverified workspace owner keeps one board recovery action for its exact run
+and owner fingerprint. Repeated recovery checks do not consume attempts or
+rewrite that action. Task completion or cancellation does not prove the old
+physical writer stopped, so reads and recovery sweeps retain this action while
+the matching run still carries that owner receipt. After the receipt is cleared
+or replaced, ordinary stale-action cleanup applies. Cleanup is attributed to
+the system; historical cleanup from page reads does not add tasks to a person's
+inbox or refresh issue activity timestamps.
+
 The lock transaction holds no row locks. Ordinary progress and finalization
 receipts remain visible through the normal database pool. A dedicated connection outside the application pool is
 reserved for the duration of copyback and closed when it settles; even a one-connection application pool remains available for progress writes. Its run profile carries

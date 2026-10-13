@@ -5,7 +5,15 @@ import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../../__tests__/helpers/embedded-postgres.js";
 import { runningProcesses } from "../../adapters/index.js";
-import { adapterExecutionControls } from "../adapter-execution-control.js";
+import {
+  adapterExecutionControls,
+  createAdapterExecutionControl,
+  reportAdapterStopIfUnsettled,
+  waitForAdapterStop,
+} from "../adapter-execution-control.js";
+import { AdapterStopTimeoutError } from "../adapter-stop-timeout.js";
+import { HttpError } from "../../errors.js";
+import { captureException } from "../../sentry.js";
 import { terminateLocalService } from "../local-service-supervisor.js";
 import { createHeartbeatRunState } from "./run-state.js";
 import { createHeartbeatRunPreparation } from "./run-preparation.js";
@@ -13,6 +21,14 @@ import { createHeartbeatLifecycle, type HeartbeatLifecycleDependencies } from ".
 import { createHeartbeatRunControl, type HeartbeatRunControlDependencies } from "./run-control.js";
 
 vi.mock("../live-events.js", () => ({ publishLiveEvent: vi.fn() }));
+vi.mock("../adapter-execution-control.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../adapter-execution-control.js")>();
+  return {
+    ...actual,
+    waitForAdapterStop: vi.fn(actual.waitForAdapterStop),
+    reportAdapterStopIfUnsettled: vi.fn(actual.reportAdapterStopIfUnsettled),
+  };
+});
 vi.mock("../local-service-supervisor.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("../local-service-supervisor.js")>(),
   terminateLocalService: vi.fn(async () => undefined),
@@ -254,6 +270,67 @@ describe.skipIf(!support.supported)("heartbeat run-control database wiring", () 
     expect(terminateLocalService).toHaveBeenCalledTimes(2);
     // The executor still owns removal of this evidence after it observes Stop.
     expect(deps.failedProcessRunCancellations.get(run.id)?.error).toBe(failure);
+  });
+
+  async function ownedAdapterRun() {
+    const { company, agent } = await fixture();
+    const [run] = await db.insert(heartbeatRuns).values({ companyId: company.id, agentId: agent.id, status: "running", runtimeMode: "legacy", runtimeModeResolvedAt: new Date() }).returning();
+    const control = createAdapterExecutionControl();
+    adapterExecutionControls.set(run.id, control);
+    return { run, control };
+  }
+
+  it("answers an owned adapter Stop that is still settling with a pending conflict", async () => {
+    const { run, control } = await ownedAdapterRun();
+    const deps = callbacks(db);
+    deps.activeRunExecutions.add(run.id);
+    try {
+      let waitStartedAt = 0;
+      vi.mocked(waitForAdapterStop).mockImplementationOnce(async () => {
+        waitStartedAt = Date.now();
+        throw new AdapterStopTimeoutError(60_000, { runId: run.id });
+      });
+      const requestedAt = Date.now();
+      const error = await createHeartbeatRunControl(db, deps).cancelRunInternal(run.id).catch((err: unknown) => err);
+      expect(error).toBeInstanceOf(HttpError);
+      expect(error).toMatchObject({
+        status: 409,
+        message: "Execution is still stopping; termination has not been verified.",
+        details: { code: "adapter_stop_pending", runId: run.id },
+      });
+      expect(control.controller.signal.aborted).toBe(true);
+      // Only a Stop that never settles is reported, from the same execution.
+      expect(reportAdapterStopIfUnsettled).toHaveBeenCalledWith(control.settled, captureException,
+        expect.objectContaining({ runId: run.id, adapterType: "codex_local", runtimeMode: "legacy", abortRequested: true }), control,
+        { stopRequestedAt: expect.any(Number) });
+      // Its report bound runs from the Stop request, before the response wait.
+      const { stopRequestedAt } = vi.mocked(reportAdapterStopIfUnsettled).mock.calls.at(-1)![4]!;
+      expect(stopRequestedAt).toBeGreaterThanOrEqual(requestedAt);
+      expect(stopRequestedAt).toBeLessThanOrEqual(waitStartedAt);
+      // A pending Stop is not a cancellation receipt.
+      expect(deps.setRunStatusFromLive).not.toHaveBeenCalled();
+      expect(deps.finalizeAgentStatus).not.toHaveBeenCalled();
+      expect((await deps.getRun(run.id))?.status).toBe("running");
+      expect(deps.failedProcessRunCancellations.has(run.id)).toBe(false);
+    } finally {
+      control.finish();
+      adapterExecutionControls.delete(run.id);
+    }
+  });
+
+  it("keeps other owned adapter Stop failures unchanged", async () => {
+    const { run, control } = await ownedAdapterRun();
+    const deps = callbacks(db);
+    vi.mocked(reportAdapterStopIfUnsettled).mockClear();
+    try {
+      const failure = new Error("owner wait failed");
+      vi.mocked(waitForAdapterStop).mockRejectedValueOnce(failure);
+      await expect(createHeartbeatRunControl(db, deps).cancelRunInternal(run.id)).rejects.toBe(failure);
+      expect(reportAdapterStopIfUnsettled).not.toHaveBeenCalled();
+    } finally {
+      control.finish();
+      adapterExecutionControls.delete(run.id);
+    }
   });
 
   it("deduplicates agent batches and cancels only unclaimed pending wakes", async () => {

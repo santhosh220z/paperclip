@@ -8,6 +8,7 @@ import { registerChatQueueWork } from "./chat-delivery-work.js";
 export const SLACK_COMMAND_POST_STALE_MS = 60_000;
 export const SLACK_COMMAND_EXPLICIT_RETRY_STALE_MS = 5 * 60_000;
 export const SLACK_COMMAND_ADMISSION_STALE_MS = 60_000;
+export const FAILED_RUN_RETRY_STALE_MS = 60_000;
 export const PROVIDER_EFFECT_STALE_MS = 60_000;
 
 /** The dispatch predicate and scheduler use the same eligibility and deadlines.
@@ -15,6 +16,9 @@ export const PROVIDER_EFFECT_STALE_MS = 60_000;
 export function chatActionDeadline(kind: ScheduledChatAction) {
   const updated = sql`extract(epoch from ${chatActions.updatedAt}) * 1000`;
   const retry = sql`coalesce(extract(epoch from (${chatActions.result}->>'retryAt')::timestamptz) * 1000, 0)`;
+  if (kind === "failed_run_retry") return sql<number>`case
+    when ${chatActions.status} = 'issued' then ${retry}
+    when ${chatActions.status} = 'processing' then greatest(${updated} + ${FAILED_RUN_RETRY_STALE_MS}, ${retry}) end`;
   if (kind === "slack_board_message") return sql<number>`case
     when ${chatActions.status} = 'received' and ${chatEndpoints.status} not in ('paused', 'attention') then 0::numeric end`;
   if (kind === "slash_task_start") return sql<number>`case
@@ -36,14 +40,16 @@ export function chatActionDeadline(kind: ScheduledChatAction) {
 function pendingChatAction(kind: ScheduledChatAction) {
   // Filter history before the endpoint join and aggregate. Failed actions
   // only remain live when the saved result permits another attempt.
-  const status = kind === "slack_board_message"
-    ? eq(chatActions.status, "received")
-    : kind === "slash_task_start"
-      ? inArray(chatActions.status, ["queued", "provider_confirmed", "admitting", "resolving", "validating"])
-      : kind === "slack_session_sync"
-        ? inArray(chatActions.status, ["received", "processing"])
-        : or(inArray(chatActions.status, ["received", "processing"]),
-        and(eq(chatActions.status, "failed"), sql`${chatActions.result}->>'retryable' = 'true'`));
+  const status = kind === "failed_run_retry"
+    ? inArray(chatActions.status, ["issued", "processing"])
+    : kind === "slack_board_message"
+      ? eq(chatActions.status, "received")
+      : kind === "slash_task_start"
+        ? inArray(chatActions.status, ["queued", "provider_confirmed", "admitting", "resolving", "validating"])
+        : kind === "slack_session_sync"
+          ? inArray(chatActions.status, ["received", "processing"])
+          : or(inArray(chatActions.status, ["received", "processing"]),
+          and(eq(chatActions.status, "failed"), sql`${chatActions.result}->>'retryable' = 'true'`));
   return and(eq(chatActions.kind, kind), status);
 }
 
@@ -60,6 +66,7 @@ export async function nextChatActionAt(db: Db, kind: ScheduledChatAction): Promi
 }
 
 type ChatActionService = {
+  processFailedChatRunRetries(): Promise<unknown>;
   processPendingProviderEffects(): Promise<unknown>;
   processPendingGitHubWebhookIngress(): Promise<unknown>;
   processPendingSlackSessionSyncs(): Promise<unknown>;
@@ -78,6 +85,7 @@ export function registerChatActionWork(
   canRun: () => boolean,
 ) {
   const actions = [
+    { kind: "failed_run_retry", run: service.processFailedChatRunRetries },
     { kind: "provider_effect", run: service.processPendingProviderEffects },
     { kind: "github_webhook_ingress", run: service.processPendingGitHubWebhookIngress },
     { kind: "slack_session_sync", run: service.processPendingSlackSessionSyncs },

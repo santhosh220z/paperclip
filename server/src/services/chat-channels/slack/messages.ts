@@ -41,3 +41,49 @@ export function slackMessageSentAt(raw: unknown, messageId: string): Date | null
   const date = new Date(Number(ts) * 1_000);
   return Number.isFinite(date.getTime()) ? date : null;
 }
+
+export function isSlackReceiptReactionAlreadyApplied(error: unknown): boolean {
+  const pending: Array<{ depth: number; value: unknown }> = [
+    { depth: 0, value: error },
+  ];
+  const seen = new Set<object>();
+  while (pending.length > 0) {
+    const current = pending.shift();
+    if (
+      !current ||
+      current.depth > 4 ||
+      !current.value ||
+      typeof current.value !== "object" ||
+      seen.has(current.value)
+    ) {
+      continue;
+    }
+    seen.add(current.value);
+    const record = current.value as {
+      cause?: unknown;
+      code?: unknown;
+      data?: { error?: unknown };
+      original?: unknown;
+      originalError?: unknown;
+    };
+    if (
+      record.code === "already_reacted" ||
+      record.data?.error === "already_reacted"
+    ) {
+      return true;
+    }
+    for (const value of [record.cause, record.original, record.originalError]) {
+      pending.push({ depth: current.depth + 1, value });
+    }
+  }
+  return false;
+}
+
+export function slackThreadChannelId(threadId: string): string | null {
+  if (!threadId.startsWith("slack:")) return null;
+  const channelAndThread = threadId.slice("slack:".length);
+  const separator = channelAndThread.indexOf(":");
+  const channelId =
+    separator === -1 ? channelAndThread : channelAndThread.slice(0, separator);
+  return channelId || null;
+}

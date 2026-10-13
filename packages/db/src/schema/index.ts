@@ -243,6 +243,11 @@ export { chatVoiceReports } from "./chat_voice_reports.js";
 export { chatVoicePhoneLines, chatVoiceInboundCalls } from "./chat_voice_inbound.js";
 export * from "./decision_models.js";
 export { userCompanyPreferences } from "./user_company_preferences.js";
+
+export { chatSlackManagerGrants } from "./chat_slack_manager_grants.js";
 export { aiSubscriptions, aiSubscriptionPrices, aiSubscriptionConnections } from "./ai_subscriptions.js";
 
+export { executionWorkspaceRepositories } from "./execution_workspace_repositories.js";
+export { executionWorkspaceRepositoryRoots } from "./execution_workspace_repository_roots.js";
+export { executionWorkspaceRepositoryAccess } from "./execution_workspace_repository_access.js";
 export * from "./fast_responses.js";

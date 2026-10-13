@@ -1059,7 +1059,7 @@ describe("sandbox callback bridge", () => {
       await bridge.stop();
     });
 
-    await writeFile(
+    await publishBridgeRequest(
       path.posix.join(directories.requestsDir, "existing.json"),
       `${JSON.stringify({
         id: "existing",
@@ -1070,7 +1070,6 @@ describe("sandbox callback bridge", () => {
         body: "",
         createdAt: new Date().toISOString(),
       })}\n`,
-      "utf8",
     );
 
     const queueFullResponse = await fetch(`${bridge.baseUrl}/api/agents/me`, {
@@ -1501,6 +1500,7 @@ describe("sandbox callback bridge", () => {
       { method: "GET", path: "/api/goals/goal-1" },
       { method: "GET", path: "/api/issues/issue-1" },
       { method: "GET", path: "/api/issues/issue-1/heartbeat-context" },
+      { method: "GET", path: "/api/issues/issue-1/activity" },
       { method: "GET", path: "/api/issues/issue-1/comments" },
       { method: "GET", path: "/api/issues/issue-1/comments/c-1" },
       { method: "POST", path: "/api/issues/issue-1/comments" },
@@ -1547,6 +1547,10 @@ describe("sandbox callback bridge", () => {
     }
 
     const denied: Array<{ method: string; path: string }> = [
+      { method: "POST", path: "/api/issues/issue-1/activity" },
+      { method: "GET", path: "/api/issues/issue-1/activity/extra" },
+      { method: "GET", path: "/api/companies/co-1/activity" },
+      { method: "GET", path: "/api/companies/co-1/audit/agent-actions" },
       { method: "GET", path: "/api/companies/co-1/agent-commentary" },
       { method: "POST", path: "/api/companies/co-1/agent-commentary/other" },
       { method: "POST", path: "/api/companies/co-1/email/inboxes" },
@@ -1900,7 +1904,7 @@ describe("sandbox callback bridge", () => {
     const queueDir = path.posix.join(rootDir, "queue");
     const directories = sandboxCallbackBridgeDirectories(queueDir);
     await mkdir(directories.requestsDir, { recursive: true });
-    await writeFile(path.posix.join(directories.requestsDir, "req-a.json"), bridgeRequestJson("req-a"), "utf8");
+    await publishBridgeRequest(path.posix.join(directories.requestsDir, "req-a.json"), bridgeRequestJson("req-a"));
 
     const { runtimeSpan, workerErrors } = createWorkerErrorCapture();
 
@@ -2949,7 +2953,7 @@ describe("sandbox callback bridge", () => {
     const queueDir = path.posix.join(rootDir, "queue");
     const directories = sandboxCallbackBridgeDirectories(queueDir);
     await mkdir(directories.requestsDir, { recursive: true });
-    await writeFile(path.posix.join(directories.requestsDir, "req-w.json"), bridgeRequestJson("req-w"), "utf8");
+    await publishBridgeRequest(path.posix.join(directories.requestsDir, "req-w.json"), bridgeRequestJson("req-w"));
 
     const base = createFileSystemSandboxCallbackBridgeQueueClient();
     let listCalls = 0;
@@ -2996,7 +3000,7 @@ describe("sandbox callback bridge", () => {
     const queueDir = path.posix.join(rootDir, "queue");
     const directories = sandboxCallbackBridgeDirectories(queueDir);
     await mkdir(directories.requestsDir, { recursive: true });
-    await writeFile(path.posix.join(directories.requestsDir, "req-ok.json"), bridgeRequestJson("req-ok"), "utf8");
+    await publishBridgeRequest(path.posix.join(directories.requestsDir, "req-ok.json"), bridgeRequestJson("req-ok"));
 
     const { runtimeSpan, workerErrors } = createWorkerErrorCapture();
     const processed: string[] = [];

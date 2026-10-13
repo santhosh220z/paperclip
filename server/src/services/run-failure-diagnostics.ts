@@ -6,6 +6,7 @@ import { readProcessLossDiagnostic } from "./process-loss-diagnostics.js";
 import { WORKSPACE_RESTORE_FAILURE_CODES } from "@paperclipai/shared";
 import { redactDiagnosticText } from "@paperclipai/adapter-utils/command-redaction";
 import { sanitizeWorkspaceRestoreDiagnostic } from "@paperclipai/adapter-utils/workspace-restore-diagnostics";
+import { ACP_TOOL_KINDS } from "@paperclipai/adapter-utils/acpx-engine/constants";
 import { redactCurrentUserText } from "../log-redaction.js";
 import { redactSensitiveText, REDACTED_EVENT_VALUE } from "../redaction.js";
 import { readNativeModelRejectionDiagnostic } from "./native-runtime/native-provider-failure.js";
@@ -39,6 +40,15 @@ export interface RunFailureDiagnostics {
   provider: Context;
   exceptions: RunFailureException[];
   truncatedFields: string[];
+}
+
+const ACP_PENDING_TOOL_KIND_LABELS: ReadonlySet<string> = new Set([...ACP_TOOL_KINDS, "unknown"]);
+
+/** Closed ACP tool-kind labels only; any other content drops the whole field. */
+function readAcpPendingToolKinds(value: unknown): string | null {
+  if (typeof value !== "string" || value.length === 0 || value.length > 200) return null;
+  const kinds = value.split(",");
+  return kinds.every((kind) => ACP_PENDING_TOOL_KIND_LABELS.has(kind)) ? value : null;
 }
 
 function read(value: unknown, key: string): unknown {
@@ -197,10 +207,15 @@ export function collectRunFailureDiagnostics(run: Run, options: RunFailureReport
     "mode", "stopReason", "timeoutFired", "timeoutSource", "timeoutConfigured",
     "effectiveTimeoutSec", "errorFamily",
   ]));
-  for (const field of ["acpLastEventAgeMs", "acpObservedEventCount", "acpPendingToolCount"]) {
+  for (const field of [
+    "acpLastEventAgeMs", "acpObservedEventCount", "acpPendingToolCount",
+    "acpLastEventAgeAtStopMs", "acpOldestPendingToolAgeAtStopMs",
+  ]) {
     const value = read(result, field);
     if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) execution[field] = value;
   }
+  const pendingToolKinds = readAcpPendingToolKinds(read(result, "acpPendingToolKinds"));
+  if (pendingToolKinds) execution.acpPendingToolKinds = pendingToolKinds;
   const toolInventoryComplete = read(result, "acpToolInventoryComplete");
   if (typeof toolInventoryComplete === "boolean") execution.acpToolInventoryComplete = toolInventoryComplete;
   const restoreFailure = read(result, "workspaceRestoreFailure");

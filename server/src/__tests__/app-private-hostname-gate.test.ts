@@ -110,6 +110,7 @@ describe("createChatReconciliationCoordinator", () => {
     const service = readFileSync(new URL("../services/chat-channels.ts", import.meta.url), "utf8");
     const actionMaintenance = service.slice(service.indexOf("async function processPendingChatMaintenance("),
       service.indexOf("async function processPendingDeliveries("));
+    expect(actionMaintenance).not.toContain("processFailedChatRunRetries(");
     expect(actionMaintenance).not.toContain("processPendingProviderEffects(");
     expect(actionMaintenance).not.toContain("processPendingGitHubWebhookIngress(");
   });

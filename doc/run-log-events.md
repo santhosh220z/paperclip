@@ -217,6 +217,41 @@ The payload never carries a command, an argument, a path, an environment value,
 or a raw identifier. The event rides the `ctx.onEvent` run-event bridge and is
 run-log-only. It needs no OTLP endpoint.
 
+## Workspace Restore and Settled Run Measurements
+
+The heartbeat controller writes these records with `eventType: "lifecycle"`,
+`stream: "system"`, and `level: "info"`. The event name below is its `message`
+and its payload's `phase`. They remain in the instance run log and add no
+Paperclip Telemetry or OpenTelemetry export.
+
+| Event | Payload fields besides `phase` | Meaning |
+| --- | --- | --- |
+| `workspace_checkpoint` | `mode`, `scannedEntries`, `changedFiles`, `payloadBytes` | Metrics for a validated sparse checkpoint, or a full restore fallback. |
+| `workspace.restore` | `durationMs` | Wall time around native workspace restoration. |
+| `task.run.measured` | `durationMs`, `outcome`, `durableSettlement` | Wall time through terminal owner cleanup, with the persisted terminal run status and `durableSettlement: true`. |
+
+For `workspace_checkpoint`, `mode` is `"sparse"` or `"full"`. Sparse metrics
+count snapshot entries in `scannedEntries`, regular files in the validated
+downloaded payload in `changedFiles`, and their total bytes in `payloadBytes`.
+Deleted entries and symlinks do not add to the regular-file count or byte total.
+Full fallback reports all three counts as `null`: unavailable, not zero. A run
+can emit multiple checkpoint records while restoring its repositories. These
+payloads contain no paths, filenames, file contents, or credentials.
+
+`workspace.restore` is emitted when the timed restoration exits, including an
+exception. It has no outcome field and does not by itself prove restore success.
+Its producer is the native workspace sync `onPhase` callback.
+
+`task.run.measured` is emitted only after the controller observes a terminal run
+with no remaining native runner ownership. Its duration starts at `startedAt`,
+or `createdAt` if the run never started, and includes preparation, execution,
+finalization, and cleanup. It is not model-only time; the creation-time fallback
+also includes time spent queued. `outcome` is the actual terminal status, such as
+`succeeded`, `failed`, or `cancelled`. Provider turn completion can precede this
+settlement record. The record does not imply exactly-once emission across
+controller recovery, and failure to write it is logged without changing the
+already-settled outcome.
+
 ## ACP terminal failure diagnostics
 
 The shared ACP adapter engine preserves typed terminal session failures in the

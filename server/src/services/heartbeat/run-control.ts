@@ -44,8 +44,11 @@ import {
 import {
   adapterExecutionControls,
   captureAdapterStopOwnership,
+  reportAdapterStopIfUnsettled,
   waitForAdapterStop,
 } from "../adapter-execution-control.js";
+import { AdapterStopTimeoutError } from "../adapter-stop-timeout.js";
+import { captureException } from "../../sentry.js";
 import { randomUUID } from "node:crypto";
 import {
   and,
@@ -999,6 +1002,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
           processCancellationSettlement,
         );
       }
+      const stopRequestedAt = Date.now();
       const cancellation = await (async () => {
         try {
           if (control) {
@@ -1059,12 +1063,24 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
           }
 
           if (control) {
-            await waitForAdapterStop(control.settled, undefined, {
+            const stopDiagnostics = {
               runId: run.id,
               adapterType: agent?.adapterType,
               runtimeMode: run.runtimeMode,
               abortRequested: control.controller.signal.aborted,
-            }, control);
+            };
+            try {
+              await waitForAdapterStop(control.settled, undefined, stopDiagnostics, control);
+            } catch (error) {
+              if (!(error instanceof AdapterStopTimeoutError)) throw error;
+              // The owned adapter is still settling (for example copying the
+              // workspace back) and keeps its Stop proof requirements. Answer
+              // this request honestly; report only a Stop that never settles.
+              reportAdapterStopIfUnsettled(control.settled, captureException, stopDiagnostics, control, {
+                stopRequestedAt,
+              });
+              throw conflict(error.message, { code: "adapter_stop_pending", runId: run.id });
+            }
             const stopped = await getRun(run.id);
             if (stopped && isHeartbeatRunTerminalStatus(stopped.status)) {
               if (

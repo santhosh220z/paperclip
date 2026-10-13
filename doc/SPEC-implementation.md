@@ -2160,6 +2160,17 @@ Company Settings → General can configure one shared API-key connection for opt
 
 The internal service provides local-only availability and bounded, reauthorized execution. It records metadata-only invocation history and independent fractional service charges in the existing cost ledger, applying company and applicable agent/project budgets under the accounting lock. Unknown dispatch charges retain reservations until audited resolution. Settings/testing require connection management permission; history uses existing cost visibility. See [decision-models.md](decision-models.md) for the contract, supported models, accounting, privacy, and endpoints.
 
+
+### Task workspace ownership (2026-10-09)
+
+A task's organizational project and filesystem workspace are independent. New tasks that need a filesystem and have no selected/configured workspace get a company/task directory, not the agent home. Plain tasks need neither Git nor a project. Existing bindings and admitted roots remain authoritative; changing project does not move files. Explicit workspace selections apply at a subsequent normal admission after prior execution and persistence obligations settle.
+
+Chat connection and destination settings may supply project/workspace defaults. Destination fields override connection fields; omitted values inherit and null clears the inherited choice. Resolve and authorize these defaults once for a new conversation, then retain the resulting task intent. Existing conversations do not change when settings change. Trust confinement still takes precedence.
+
+Agents inspect/select workspaces and request contained repository preparation through ordinary authorized APIs. Repository preparation is idempotent and may require the next admission; it never claims a host-only clone is available in an already-running remote session. Simultaneous tasks may still explicitly share one physical local/SSH folder. Remote sharing requires actual placement and coherent persistence capability.
+
+See [the layer architecture](plans/2026-10-09-task-workspaces.md) for resolution rules, module ownership, persistence versions, rollout, and verification.
+
 ## Company fast-response service
 
 Companies may configure an optional shared API connection and model for short acknowledgements of accepted human turns. Fast responses use direct SDK inference alongside normal agent work, with a three-second admission deadline, bounded prompts/output, current authorization and independent `fast_response` accounting. They are server-marked platform receipts attributed to the agent, never completion, interaction or recovery evidence. Company-sponsored unlinked external senders are explicit; linked-user permission denials are never bypassed. See [fast-responses.md](fast-responses.md) for provider, delivery, history and endpoint contracts.
