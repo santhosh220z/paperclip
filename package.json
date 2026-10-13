@@ -57,6 +57,8 @@
     "smoke:openclaw-docker-ui": "./scripts/smoke/openclaw-docker-ui.sh",
     "smoke:openclaw-sse-standalone": "./scripts/smoke/openclaw-sse-standalone.sh",
     "smoke:mcp-fixtures": "node scripts/smoke/mcp-fixture-harness.mjs",
+    "smoke:claude-credential-store": "node scripts/smoke/claude-credential-store.mjs",
+    "test:claude-credential-store": "node --test scripts/smoke/claude-credential-store.test.mjs",
     "smoke:notion-generic-live": "node scripts/smoke/notion-generic-live.mjs",
     "smoke:posthog-live": "node scripts/smoke/posthog-live.mjs",
     "smoke:pipelines-tutorial": "./scripts/smoke/pipelines-tutorial-smoke.sh",

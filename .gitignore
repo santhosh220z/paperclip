@@ -86,3 +86,6 @@ test-results/
 
 # Local native Runner test/session state
 .paperclip-runner-prp/
+
+# Local live-characterization evidence (sanitized, but per-run)
+claude-credential-store-*/
